@@ -1,8 +1,13 @@
-import yfinance as yf
+from time import sleep
+from datetime import datetime, timedelta
 import sqlite3
+
 import pandas as pd
 import pandas_ta as ta
+import yfinance as yf
 
+chip_tickers = ["ARM", "TSM"]
+bigtech_tickers = ["AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOG"]
 dow30_tickers = [
     "AAPL", "NVDA", "MSFT", "AMZN", "WMT", "JPM", "V", "UNH", "PG", "HD",
     "JNJ", "CRM", "KO", "CVX", "MRK", "CSCO", "AXP", "MCD", "IBM", "DIS",
@@ -233,10 +238,193 @@ def download_and_store_stock_data(tickers, start_date="1900-01-01", end_date="20
     conn.close()
 
 
+
+def download_and_store_stock_data_minutes(tickers, start_date="2025-01-01", end_date="2025-01-01", db_name="sap500_nasdaq100_dow30_data.db"):
+
+    # use start date as current date - 30 d
+    # end date as current date
+    # iterate 7 days at a time b/c yahoo
+    # limit to 1.8/1.9s per query to avoid rate limit
+    # use while loop
+    yahoo_lookback_max_limit = 29 #days # tried 30 fails,  with today can go back 29 additional
+    end_date_obj   = datetime.now()
+    start_date_obj = end_date_obj - timedelta(days=yahoo_lookback_max_limit)
+
+
+    db_name = db_name.replace(".db", f"_{start_date_obj.strftime('%Y-%m-%d')}_to_{end_date_obj.strftime('%Y-%m-%d')}_minute.db")
+
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+
+
+    columns = [
+        'Ticker', 'Datetime', 'Adj Close', 'Close', 'High', 'Low', 'Open', 'Volume', 'sma', 'ema', 'hma', 'tma', 'rma',
+        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', 'rsi', 'BBL_14_2', 'BBM_14_2', 'BBU_14_2', 'BBB_14_2',
+        'BBP_14_2', 'ADX_14', 'DMP_14', 'DMN_14', 'AROOND_14', 'AROONU_14', 'AROONOSC_14', 'force_index', 'OBV',
+        #'accumulation_distribution', 'mfi', 'vwap', 'KVO_34_55_13', 'KVOs_34_55_13', 'cmf', 'EFI_13', 'chaikin_oscillator',
+        'accumulation_distribution', 'KVO_34_55_13', 'KVOs_34_55_13', 'cmf', 'EFI_13', 'chaikin_oscillator',
+        'price_volume_trend', 'pvol', 'FWMA_10', 'atr', 'STOCHRSIk_14_14_3_3', 'STOCHRSId_14_14_3_3', 'TRIX_30_9', 'TRIXs_30_9',
+        'PSARl_0_02_0_2', 'PSARs_0_02_0_2', 'PSARaf_0_02_0_2', 'PSARr_0_02_0_2', 'cci', 'donchian_upper', 'donchian_middle',
+        'donchian_lower', 'SUPERT_7_3', 'SUPERTd_7_3', 'SUPERTl_7_3', 'SUPERTs_7_3', 'ISA_9', 'ISB_26', 'ITS_9',
+        'IKS_26', 'rvi', 'NATR_14', 'sharpe_ratio', 'sortino_ratio', 'max_drawdown'#, 'pure_profit_score'
+    ]
+
+    ticker_iter = 1
+    num_tickers = len(tickers)
+    rate_limit_delay = 1.9 # could go 1.8 for exactly 2000 req in one hour but on chance get blocked, add buffer of 0.1s
+    for ticker in tickers:
+        print(f"Downloading data for {ticker}... {ticker_iter} out of {num_tickers}")
+        ticker_iter += 1
+
+
+        current_start_obj = start_date_obj
+
+        while current_start_obj < end_date_obj:
+            try:
+                current_end_obj = current_start_obj + timedelta(days=7)
+                data = yf.download(ticker, start=current_start_obj.strftime('%Y-%m-%d'), end=current_end_obj.strftime('%Y-%m-%d'), interval='1m')
+                sleep(rate_limit_delay)
+                #data['ticker'] = ticker
+                #data["Date"] = data.index
+                data = data.xs(ticker, level=1, axis=1)
+
+
+                data['sma'] = ta.sma(data['Close'], length=14)
+                data['ema'] = ta.ema(data['Close'], length=14)
+                data['hma'] = ta.hma(data['Close'], length=14)
+                data['tma'] = ta.trima(data['Close'], length=14)
+                data['rma'] = ta.rma(data['Close'], length=14)
+                data.ta.macd(close=data['Close'], fast=12, slow=26, signal=9, append=True)
+                #data['macd'], data['macd_signal'], data['macd_hist'] = ta.trend.macd(data['Close'], fast=12, slow=26, signal=9, append=True)
+                data['rsi'] = ta.rsi(data['Close'], length=14)
+                #data['bollinger_upper'], data['bollinger_middle'], data['bollinger_lower'] = ta.bbands(data['Close'], length=14)
+                data.ta.bbands(close=data['Close'], length=14, append=True)
+                #data['adx'] = ta.adx(data['High'], data['Low'], data['Close'], length=14)
+                data.ta.adx(append=True)
+                #data['aroon_up'], data['aroon_down'] = ta.aroon(data['High'], data['Low'], length=14)
+                data.ta.aroon(high=data['High'], low=data['Low'], length=14, append=True)
+                data['force_index'] = ta.efi(data['Close'], data['Volume'], length=14)
+                data.ta.obv(append=True)
+                #data['obv'] = ta.obv(data['Close'], data['Volume'])
+                #data['obv'] = ta.volume.obv(data['Close'], data['Volume'])
+                data['accumulation_distribution'] = ta.ad(data['High'], data['Low'], data['Close'], data['Volume'])
+                ##data['mfi'] = (ta.mfi(data['High'], data['Low'], data['Close'], data['Volume'], length=14))
+                ##data['vwap'] = ta.vwap(data['High'], data['Low'], data['Close'], data['Volume'])
+                #data['klinger'] = ta.kvo(data['High'], data['Low'], data['Close'], data['Volume'])
+                data.ta.kvo(append=True)
+                data['cmf'] = ta.cmf(data['High'], data['Low'], data['Close'], data['Volume'], length=14)
+                ##?accumulation swing index ?##data['asi'] = ta.asi(data['High'], data['Low'], data['Close'], data['Volume'])
+                #data['efi'] = ta.efi(data['High'], data['Low'], data['Close'], data['Volume'])
+                data.ta.efi(append=True)
+                data['chaikin_oscillator'] = ta.cmf(data['High'], data['Low'], data['Close'], data['Volume'])
+                data['price_volume_trend'] = ta.pvt(data['Close'], data['Volume'])
+                data['pvol'] = ta.pvol(data['High'], data['Low'], data['Close'])
+                #data['fibonacci_retracement'] = ta.fwma(data['High'], data['Low'])
+                data.ta.fwma(append=True)
+                data['atr'] = ta.atr(data['High'], data['Low'], data['Close'], length=14)
+                #data['stochastic_rsi'] = ta.stochrsi(data['Close'], length=14)
+                data.ta.stochrsi(append=True)
+                #data['trix'] = ta.trix(data['Close'], length=14)
+                data.ta.trix(append=True)
+                #data['parabolic_sar'] = ta.psar(data['High'], data['Low'], data['Close'], af=0.02, max_af=0.2)
+                data.ta.psar(append=True)
+                data['cci'] = ta.cci(data['High'], data['Low'], data['Close'], length=14)
+                #data['donchian_upper'], data['donchian_middle'], data['donchian_lower'] = ta.donchian(data['High'], data['Low'], length=14)
+                data.ta.donchian(append=True)
+                #data['supertrend'] = ta.supertrend(data['High'], data['Low'], data['Close'], length=14, multiplier=3)
+                data.ta.supertrend(append=True)
+                #data['ichimoku_cloud'] = ta.ichimoku(data['High'], data['Low'], data['Close'])
+                data.ta.ichimoku(lookahead=False, append=True)
+                #data['dmi_plus'], data['dmi_minus'], data['adx'] = ta.dmi(data['High'], data['Low'], data['Close'], length=14)
+                data.ta.dm(append=True)
+                data['rvi'] = ta.rvi(data['Close'], length=14)
+                #data['normalized_average_true_range'] = ta.natr(data['Close'], length=14)
+                data.ta.natr(append=True)
+
+                # Candlestick patterns # ToDo fix and add the candlestick metrics
+                '''
+                data['doji'] = ta.cdl_doji(data)
+                data['engulfing'] = ta.cdl_engulfing(data)
+                data['hammer'] = ta.cdl_hammer(data)
+                data['morning_star'] = ta.cdl_morningstar(data)
+                data['evening_star'] = ta.cdl_eveningstar(data)
+                data['piercing'] = ta.cdl_piercing(data)
+                data['dark_cloud_cover'] = ta.cdl_darkcloudcover(data)
+                data['marubozu'] = ta.cdl_marubozu(data)
+                data['shooting_star'] = ta.cdl_shootingstar(data)
+                data['spinning_top'] = ta.cdl_spinningtop(data)
+                data['dragonfly_doji'] = ta.cdl_dragonflydoji(data)
+                data['gravestone_doji'] = ta.cdl_gravestonedoji(data)
+                data['inside'] = ta.cdl_inside(data)
+                data['harami'] = ta.cdl_harami(data)
+                data['harami_cross'] = ta.cdl_haramicross(data)
+                data['inverted_hammer'] = ta.cdl_invertedhammer(data)
+                data['abandoned_baby'] = ta.cdl_abandonedbaby(data)
+                data['three_white_soldiers'] = ta.cdl_threewhitesoldiers(data)
+                data['three_black_crows'] = ta.cdl_threeblackcrows(data)
+                ##
+                data.ta.cdl_doji(appened=True)
+                data.ta.cdl_engulfing(appened=True)
+                data.ta.cdl_hammer(appened=True)
+                data.ta.cdl_morningstar(appened=True)
+                data.ta.cdl_eveningstar(appened=True)
+                data.ta.cdl_piercing(appened=True)
+                data.ta.cdl_darkcloudcover(appened=True)
+                data.ta.cdl_marubozu(appened=True)
+                data.ta.cdl_shootingstar(appened=True)
+                data.ta.cdl_spinningtop(appened=True)
+                data.ta.cdl_dragonflydoji(appened=True)
+                data.ta.cdl_gravestonedoji(appened=True)
+                data.ta.cdl_inside(appened=True)
+                data.ta.cdl_harami(appened=True)
+                data.ta.cdl_haramicross(appened=True)
+                data.ta.cdl_invertedhammer(appened=True)
+                data.ta.cdl_abandonedbaby(appened=True)
+                data.ta.cdl_threewhitesoldiers(appened=True)
+                data.ta.cdl_threeblackcrows(appened=True)
+                '''
+                # Performance Metrics (Sharpe Ratio, Sortino Ratio, etc.)
+                # better applied to strategies rather than raw data
+                #data['sharpe_ratio'] = ta.sharpe_ratio(data['Close'])
+                #data['sortino_ratio'] = ta.sortino_ratio(data['Close'])
+                #data['max_drawdown'] = ta.max_drawdown(data['Close'])
+
+
+                data.insert(0, 'Datetime', data.index)
+                data.insert(0, 'Ticker', ticker)
+
+
+
+                create_table_sql = f'''
+                CREATE TABLE IF NOT EXISTS "{ticker}" (
+                    {", ".join([f"'{col}' TEXT" for col in data.columns])}
+                )
+                '''
+                cursor.execute(create_table_sql)
+
+
+                data.to_sql(ticker, conn, if_exists='append', index=False)
+
+                conn.commit()
+
+                current_start_obj += timedelta(days=7)
+            except Exception as e:
+                print(e)
+                current_start_obj = end_date_obj
+                break
+
+    conn.close()
+
+
+
+
+
+
 if __name__ == '__main__':
     #download_and_store_stock_data(combined_dow30_nasdaq100_sap500_tickers)
-    download_and_store_stock_data(dow30_tickers, db_name="dow30_data.db")
+    #download_and_store_stock_data(dow30_tickers, db_name="dow30_data.db")
     #download_and_store_stock_data(nasdaq100_tickers, db_name="nasdaq100_data.db")
     #download_and_store_stock_data(sap500_tickers, db_name="sap500_data.db")
+    download_and_store_stock_data_minutes(chip_tickers, db_name="ARM_TMSC_data.db")
 
     print("Data download and storage complete with technical indicators!")
