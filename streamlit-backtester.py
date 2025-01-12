@@ -44,6 +44,7 @@ strategy_type = st.sidebar.selectbox(
         "Moving Average Crossover", "RSI", "MACD", "Bollinger Bands", "SuperTrend", "Ichimoku Cloud",
         #"Parabolic SAR", "Aroon Indicator", "Chaikin Oscillator", "Force Index", "Money Flow Index (MFI)",
         #"Commodity Channel Index (CCI)"#, "Exponential Moving Average (EMA) Crossover"
+        "Custom Strategy"
         # disabled last options til can get working
     ]
 )
@@ -63,43 +64,39 @@ mfi_period = 14
 mfi_oversold =20
 mfi_overbought = 80
 
+COMPARISON_OPERATORS = {
+    "greater than": ">",
+    "less than": "<",
+    "equals": "==",
+    "greater than or equals": ">=",
+    "less than or equals": "<="
+}
 
-if strategy_type == "Moving Average Crossover":
-    ma_type = st.sidebar.selectbox("MA Type", ["SMA", "EMA", "HMA", "TMA", "RMA"])
-    short_window = st.sidebar.slider("Short Window", 5, 50, 20)
-    long_window = st.sidebar.slider("Long Window", 20, 200, 50)
-elif strategy_type == "RSI":
-    oversold = st.sidebar.slider("Oversold Level", 20, 40, 30)
-    overbought = st.sidebar.slider("Overbought Level", 60, 80, 70)
-elif strategy_type == "MACD":
-    signal_crossover = st.sidebar.checkbox("Use Signal Line Crossover", value=True)
-elif strategy_type == "Bollinger Bands":
-    bb_strategy = st.sidebar.selectbox("Strategy Type", ["Mean Reversion", "Breakout"])
-elif strategy_type == "SuperTrend":
-    trend_strength = st.sidebar.slider("Minimum ADX for Trend", 15, 40, 25)
-elif strategy_type == "Ichimoku Cloud":
-    cloud_strategy = st.sidebar.selectbox("Strategy Type", ["Cloud Breakout", "TK Cross"])
-elif strategy_type == "Parabolic SAR":
-    acceleration_factor = st.sidebar.slider("Acceleration Factor", 0.01, 0.1, 0.02)
-    max_af = st.sidebar.slider("Maximum Acceleration Factor", 0.1, 1.0, 0.2)
-elif strategy_type == "Aroon Indicator":
-    aroon_period = st.sidebar.slider("Aroon Period", 10, 50, 14)
-elif strategy_type == "Chaikin Oscillator":
-    chaikin_short_window = st.sidebar.slider("Chaikin Short Window", 5, 30, 10)
-    chaikin_long_window = st.sidebar.slider("Chaikin Long Window", 30, 100, 30)
-elif strategy_type == "Force Index":
-    force_index_window = st.sidebar.slider("Force Index Window", 5, 30, 13)
-elif strategy_type == "Money Flow Index (MFI)":
-    mfi_period = st.sidebar.slider("MFI Period", 10, 50, 14)
-    mfi_oversold = st.sidebar.slider("MFI Oversold Level", 10, 30, 20)
-    mfi_overbought = st.sidebar.slider("MFI Overbought Level", 70, 90, 80)
-elif strategy_type == "Commodity Channel Index (CCI)":
-    cci_period = st.sidebar.slider("CCI Period", 10, 50, 20)
-    cci_overbought = st.sidebar.slider("CCI Overbought Level", 100, 200, 100)
-    cci_oversold = st.sidebar.slider("CCI Oversold Level", -100, -200, -100)
+REFERENCE_TYPES = {
+    "value": "fixed value",
+    "indicator": "another indicator",
+    "price": "price data",
+    "moving average": "moving average of self"
+}
 
+def get_available_indicators(df):
+    """Dynamically get all available indicators from dataframe columns."""
+    # Exclude common non-indicator columns
+    exclude_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Datetime', 'ticker']
+    indicators = [col for col in df.columns if col not in exclude_columns]
+    return sorted(indicators)
 
-initial_investment = st.sidebar.number_input("Initial Investment ($)", value=10000.0, step=1000.0)
+def create_indicator_condition():
+    """Create a new default condition structure"""
+    return {
+        "indicator": None,
+        "comparison": "greater than",
+        "reference_type": "value",
+        "reference_value": 0,
+        "reference_indicator": None,
+        "ma_period": 0,
+        "logic": "AND"
+    }
 
 
 @st.cache_data
@@ -125,28 +122,80 @@ def load_data(ticker, db_name):
     return df
 
 
+def evaluate_condition(df, condition):
+    """Dynamically evaluate a single condition"""
+    # Get base indicator values
+    try:
+        indicator_values = pd.to_numeric(df[condition["indicator"]])
+    except:
+        st.error(f"Error converting indicator {condition['indicator']} to numeric values")
+        return pd.Series(False, index=df.index)
+
+    # Get reference values based on type
+    if condition["reference_type"] == "value":
+        reference_values = condition["reference_value"]
+    elif condition["reference_type"] == "indicator":
+        reference_values = pd.to_numeric(df[condition["reference_indicator"]])
+    elif condition["reference_type"] == "price":
+        reference_values = pd.to_numeric(df[condition["reference_value"]])
+    elif condition["reference_type"] == "moving average":
+        reference_values = indicator_values.rolling(window=condition["ma_period"]).mean()
+
+    # Create comparison string and evaluate
+    operator = COMPARISON_OPERATORS[condition["comparison"]]
+    return eval(f"indicator_values {operator} reference_values")
+
+
+
+def evaluate_custom_strategy(df, conditions):
+    """Evaluate all conditions and combine them according to their logic"""
+    if not conditions:
+        return pd.DataFrame(0, index=df.index, columns=['position'])
+
+    signals = pd.DataFrame(index=df.index)
+    signals['position'] = 0
+
+    combined_condition = None
+
+    for i, condition in enumerate(conditions):
+        current_condition = evaluate_condition(df, condition)
+
+        if combined_condition is None:
+            combined_condition = current_condition
+        else:
+            if condition["logic"] == "AND":
+                combined_condition = combined_condition & current_condition
+            else:  # OR
+                combined_condition = combined_condition | current_condition
+
+    signals['position'] = combined_condition.astype(int)
+    return signals
+
+
 def implement_strategy(df, strategy_type):
     signals = pd.DataFrame(index=df.index)
     signals['position'] = 0
 
     if strategy_type == "Moving Average Crossover":
+        indicator = ""
         if ma_type == "SMA":
-            df['MA_short'] = pd.to_numeric(df['sma'].shift(short_window), errors='coerce')
-            df['MA_long'] = pd.to_numeric(df['sma'].shift(long_window), errors='coerce')
+            indicator = 'sma'
         elif ma_type == "EMA":
-            df['MA_short'] = pd.to_numeric(df['ema'].shift(short_window), errors='coerce')
-            df['MA_long'] = pd.to_numeric(df['ema'].shift(long_window), errors='coerce')
+            indicator = 'ema'
         elif ma_type == "HMA":
-            df['MA_short'] = pd.to_numeric(df['hma'].shift(short_window), errors='coerce')
-            df['MA_long'] = pd.to_numeric(df['hma'].shift(long_window), errors='coerce')
+            indicator = 'hma'
         elif ma_type == "TMA":
-            df['MA_short'] = pd.to_numeric(df['tma'].shift(short_window), errors='coerce')
-            df['MA_long'] = pd.to_numeric(df['tma'].shift(long_window), errors='coerce')
+            indicator = 'tma'
         elif ma_type == "RMA":
-            df['MA_short'] = pd.to_numeric(df['rma'].shift(short_window), errors='coerce')
-            df['MA_long'] = pd.to_numeric(df['rma'].shift(long_window), errors='coerce')
+            indicator = 'rma'
 
-        signals['position'] = np.where(df['MA_short'] > df['MA_long'], 1, 0)
+        if len(indicator) > 0:
+            df['MA_short'] = pd.to_numeric(df[indicator].shift(short_window), errors='coerce')
+            df['MA_long'] = pd.to_numeric(df[indicator].shift(long_window), errors='coerce')
+
+            signals['position'] = np.where(df['MA_short'] > df['MA_long'], 1, 0)
+        else:
+            raise Exception(f"Unable to find associated indicator for {ma_type} in Moving Avg Crossover")
 
     elif strategy_type == "RSI":
         signals['position'] = np.where(pd.to_numeric(df['rsi']) < oversold, 1,
@@ -208,7 +257,11 @@ def implement_strategy(df, strategy_type):
     elif strategy_type == "Commodity Channel Index (CCI)":
         df['cci'] = pd.to_numeric(df['cci'], errors='coerce')
         signals['position'] = np.where(df['cci'] < -100, 1, np.where(df['cci'] > 100, 0, signals['position'].shift(1)))
-
+    elif strategy_type == "Custom Strategy":
+        if not st.session_state.conditions:
+            st.warning("Please add at least one condition to your custom strategy")
+            return signals
+        signals = evaluate_custom_strategy(df, st.session_state.conditions)
 
     signals['position'] = signals['position'].fillna(0)
     return df, signals
@@ -313,8 +366,131 @@ def plot_mfi(df, period=mfi_period, oversold=mfi_oversold, overbought=mfi_overbo
 
 st.title("Stock Strategy Backtester")
 
-
 df = load_data(selected_ticker, selected_db)
+
+
+if strategy_type == "Moving Average Crossover":
+    ma_type = st.sidebar.selectbox("MA Type", ["SMA", "EMA", "HMA", "TMA", "RMA"])
+    short_window = st.sidebar.slider("Short Window", 5, 50, 20)
+    long_window = st.sidebar.slider("Long Window", 20, 200, 50)
+elif strategy_type == "RSI":
+    oversold = st.sidebar.slider("Oversold Level", 20, 40, 30)
+    overbought = st.sidebar.slider("Overbought Level", 60, 80, 70)
+elif strategy_type == "MACD":
+    signal_crossover = st.sidebar.checkbox("Use Signal Line Crossover", value=True)
+elif strategy_type == "Bollinger Bands":
+    bb_strategy = st.sidebar.selectbox("Strategy Type", ["Mean Reversion", "Breakout"])
+elif strategy_type == "SuperTrend":
+    trend_strength = st.sidebar.slider("Minimum ADX for Trend", 15, 40, 25)
+elif strategy_type == "Ichimoku Cloud":
+    cloud_strategy = st.sidebar.selectbox("Strategy Type", ["Cloud Breakout", "TK Cross"])
+elif strategy_type == "Parabolic SAR":
+    acceleration_factor = st.sidebar.slider("Acceleration Factor", 0.01, 0.1, 0.02)
+    max_af = st.sidebar.slider("Maximum Acceleration Factor", 0.1, 1.0, 0.2)
+elif strategy_type == "Aroon Indicator":
+    aroon_period = st.sidebar.slider("Aroon Period", 10, 50, 14)
+elif strategy_type == "Chaikin Oscillator":
+    chaikin_short_window = st.sidebar.slider("Chaikin Short Window", 5, 30, 10)
+    chaikin_long_window = st.sidebar.slider("Chaikin Long Window", 30, 100, 30)
+elif strategy_type == "Force Index":
+    force_index_window = st.sidebar.slider("Force Index Window", 5, 30, 13)
+elif strategy_type == "Money Flow Index (MFI)":
+    mfi_period = st.sidebar.slider("MFI Period", 10, 50, 14)
+    mfi_oversold = st.sidebar.slider("MFI Oversold Level", 10, 30, 20)
+    mfi_overbought = st.sidebar.slider("MFI Overbought Level", 70, 90, 80)
+elif strategy_type == "Commodity Channel Index (CCI)":
+    cci_period = st.sidebar.slider("CCI Period", 10, 50, 20)
+    cci_overbought = st.sidebar.slider("CCI Overbought Level", 100, 200, 100)
+    cci_oversold = st.sidebar.slider("CCI Oversold Level", -100, -200, -100)
+elif strategy_type == "Custom Strategy":
+    st.sidebar.markdown("### Custom Strategy Builder")
+
+    # Initialize session state
+    if 'conditions' not in st.session_state:
+        st.session_state.conditions = []
+
+    # Get available indicators
+    available_indicators = get_available_indicators(df)
+
+    # Add new condition button
+    if st.sidebar.button("Add Condition"):
+        st.session_state.conditions.append(create_indicator_condition())
+
+    # Display and edit conditions
+    for i, condition in enumerate(st.session_state.conditions):
+        st.sidebar.markdown(f"#### Condition {i+1}")
+
+        # Select indicator
+        condition["indicator"] = st.sidebar.selectbox(
+            "Indicator",
+            available_indicators,
+            key=f"indicator_{i}"
+        )
+
+        # Select comparison operator
+        condition["comparison"] = st.sidebar.selectbox(
+            "Comparison",
+            list(COMPARISON_OPERATORS.keys()),
+            key=f"comparison_{i}"
+        )
+
+        # Select reference type
+        condition["reference_type"] = st.sidebar.selectbox(
+            "Compare Against",
+            list(REFERENCE_TYPES.keys()),
+            key=f"reference_type_{i}"
+        )
+
+        # Dynamic reference value input based on type
+        if condition["reference_type"] == "value":
+            condition["reference_value"] = st.sidebar.number_input(
+                "Value",
+                value=0.0,
+                key=f"reference_value_{i}"
+            )
+        elif condition["reference_type"] == "indicator":
+            condition["reference_indicator"] = st.sidebar.selectbox(
+                "Reference Indicator",
+                available_indicators,
+                key=f"reference_indicator_{i}"
+            )
+        elif condition["reference_type"] == "price":
+            condition["reference_value"] = st.sidebar.selectbox(
+                "Price Type",
+                ["Close", "Open", "High", "Low"],
+                key=f"price_type_{i}"
+            )
+        elif condition["reference_type"] == "moving average":
+            condition["ma_period"] = st.sidebar.number_input(
+                "MA Period",
+                min_value=1,
+                value=20,
+                key=f"ma_period_{i}"
+            )
+
+        # Logic connector (AND/OR)
+        if i < len(st.session_state.conditions) - 1:
+            condition["logic"] = st.sidebar.selectbox(
+                "Logic",
+                ["AND", "OR"],
+                key=f"logic_{i}"
+            )
+
+        # Remove condition button
+        if st.sidebar.button("Remove", key=f"remove_{i}"):
+            st.session_state.conditions.pop(i)
+            #st.experimental_rerun()
+
+
+
+initial_investment = st.sidebar.number_input("Initial Investment ($)", value=10000.0, step=1000.0)
+
+
+
+
+
+
+#df = load_data(selected_ticker, selected_db)
 #df = df[(df['Date'] >= pd.Timestamp(start_date)) & (df['Date'] <= pd.Timestamp(end_date))]
 #pd.to_datetime(df['Date'])
 # ToDo standardize how date is handled b/t daily data and minute data
@@ -455,11 +631,22 @@ elif strategy_type == "Money Flow Index (MFI)":
 
 
 st.subheader("Recent Trade Signals")
-signals_df = pd.DataFrame({
-    'Date': df['Datetime'],
-    'Close': pd.to_numeric(df['Close']),
-    'Position': signals['position']
-})
+try:
+    # ToDo improve this to make more elegant or standardize the naming of Date vs Datetime
+    signals_df = pd.DataFrame({
+        'Date': df['Date'],
+        'Close': pd.to_numeric(df['Close']),
+        'Position': signals['position']
+    })
+except Exception as e:
+    try:
+        signals_df = pd.DataFrame({
+            'Date': df['Datetime'],
+            'Close': pd.to_numeric(df['Close']),
+            'Position': signals['position']
+        })
+    except Exception as e:
+        st.warning("Could not load signals")
 signals_df['Signal'] = signals_df['Position'].diff()
 trades = signals_df[signals_df['Signal'] != 0].tail(10)
 trades['Action'] = trades['Signal'].map({1: 'Buy', -1: 'Sell'})
