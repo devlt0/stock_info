@@ -1,0 +1,16 @@
+
+ARM_TMSC_data_2024-12-10_to_2025-01-08_minute.db
+large_db/dow30_data1900-01-01_to_2025-01-01.db
+large_db/dow30_data2024-12-10_to_2025-01-08_minute.db
+large_db/nasdaq100_data1900-01-01_to_2025-01-01.db
+large_db/nasdaq100_data2024-12-10_to_2025-01-08_minute.db
+large_db/sap500_data1990-01-01_to_2025-01-01.db
+large_db/sap500_data2024-12-10_to_2025-01-08_minute.db
+large_db/sap500_data_2024-12-11_to_2025-01-09_minute.db
+sap500_data2024-12-10_to_2025-01-08_minute.db
+stock-strategy-backtester.py
+streamlit-backtester_better_ui.py
+streamlit-backtester_p2.py
+test.csv
+yfinance_viewer.py
+large_db/.gitattributes
