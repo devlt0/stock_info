@@ -14,3 +14,9 @@ streamlit-backtester_p2.py
 test.csv
 yfinance_viewer.py
 large_db/.gitattributes
+shards/nasdaq_list.py
+yfinance_downloader_shard.py
+shards/yfinance_downloader_shard_nyrse.py
+shards/yfinance_downloader_shard_nasdaq.py
+shards/yfinance_downloader.py
+shards/nyse_list.py
