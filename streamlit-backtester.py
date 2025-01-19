@@ -355,13 +355,15 @@ def implement_strategy(df, strategy_type):
 
 
 def calculate_performance(df, signals, initial_investment):
+    slippage_factor = 1 - slippage
+
     positions = pd.DataFrame(index=signals.index)
     positions['position'] = signals['position']
 
     # calculate time unit returns // either daily or minutes depending on db
     df['returns'] = pd.to_numeric(df['Close']).pct_change()
 
-    positions['strategy_returns'] = positions['position'].shift(1) * df['returns']
+    positions['strategy_returns'] = positions['position'].shift(1) * df['returns'] * slippage_factor
     positions['strategy_returns'] = positions['strategy_returns'].fillna(0)
 
     positions['cumulative_returns'] = (1 + positions['strategy_returns']).cumprod()
@@ -576,6 +578,8 @@ elif strategy_type == "Custom Strategy":
 
 
 initial_investment = st.sidebar.number_input("Initial Investment ($)", value=10000.0, step=1000.0)
+raw_slippage = st.sidebar.number_input("Slippage Percentage", value=1.0, step=1.0)
+slippage = raw_slippage/100
 
 
 
