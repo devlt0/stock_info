@@ -7,6 +7,12 @@ import sqlite3
 import plotly.graph_objects as go
 
 from datetime import datetime, timedelta
+from os import getcwd, listdir
+
+
+
+
+
 
 
 st.set_page_config(page_title="Stock Strategy Backtester", layout="wide")
@@ -15,14 +21,40 @@ st.set_page_config(page_title="Stock Strategy Backtester", layout="wide")
 st.sidebar.header("Strategy Parameters")
 
 
-db_files = ['index_dbs/dow30_data1900-01-01_to_2025-01-01.db',
-            'index_dbs/nasdaq100_data1900-01-01_to_2025-01-01.db',
-            'index_dbs/ARM_TMSC_data_2024-12-10_to_2025-01-08_minute.db',]  #["nasdaq100_data.db", "dow30_data.db"]   # "sap500_data.db",
+#db_files = ['large_db/dow30_data1900-01-01_to_2025-01-01.db',
+#            'large_db/nasdaq100_data1900-01-01_to_2025-01-01.db',
+#            'large_db/ARM_TMSC_data_2024-12-10_to_2025-01-08_minute.db',]  #["nasdaq100_data.db", "dow30_data.db"]   # "sap500_data.db",
+
+nyse_tickers = listdir('./shards/nyse')
+#print(f'nyse - \n{nyse_tickers}')
+
+nasdaq_tickers = listdir('./shards/nasdaq')
+#print(f'nasdaq - \n{nasdaq_tickers}')
+
+db_files = []
+db_files.extend(nyse_tickers)
+db_files.extend(nasdaq_tickers)
+db_files.sort()
+#print(f'db-files:  \n{db_files}')
+
 selected_db = st.sidebar.selectbox("Select Database", db_files)
 
+# Datetime - minutes
+# Date - dailies
 
 @st.cache_resource
-def get_available_tickers(db_name):
+def get_available_tickers(shard_name='AAPL.db'):
+    #print(shard_name)
+    db_name = shard_name
+    db_path = './shards/'
+    if shard_name in nyse_tickers:
+        db_path += 'nyse/'
+    elif shard_name in nasdaq_tickers:
+        db_path += 'nasdaq/'
+    else:
+        pass
+        # maybe ST error/warning
+    db_name = db_path + db_name
     conn = sqlite3.connect(db_name)
     cursor = conn.cursor()
     tables = cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -30,12 +62,62 @@ def get_available_tickers(db_name):
     return [table[0] for table in tables]
 
 
+@st.cache_resource
+def get_date_range(db_name, ticker):
+    db_path = './shards/'
+    if db_name in nyse_tickers:
+        db_path += 'nyse/'
+    elif db_name in nasdaq_tickers:
+        db_path += 'nasdaq/'
+    else:
+        pass
+    db_path += db_name
+    print(f'db path {db_path}')
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    query = f"SELECT MIN(date), MAX(date) FROM '{ticker}'"
+    cursor.execute(query)
+    min_date, max_date = cursor.fetchone()
+
+    conn.close()
+
+    # Convert dates from string to datetime
+
+    min_date = datetime.strptime(min_date.split()[0], "%Y-%m-%d") if min_date else datetime.now() - timedelta(days=365)
+    #datetime.strptime(min_date, "%Y-%m-%d") if min_date else datetime.now() - timedelta(days=365)
+    max_date = datetime.strptime(max_date.split()[0], "%Y-%m-%d") if max_date else datetime.now()
+    #datetime.strptime(max_date, "%Y-%m-%d") if max_date else datetime.now()
+
+    return min_date, max_date
+
+
+
+
 available_tickers = get_available_tickers(selected_db)
 selected_ticker = st.sidebar.selectbox("Select Ticker", available_tickers)
+# given change to shard by ticker, base db name and table name are just ticker
 
 
-start_date = st.sidebar.date_input("Start Date", datetime.now() - timedelta(days=365))
-end_date = st.sidebar.date_input("End Date", datetime.now())
+
+days_in_yr = 365
+trading_days_in_yr = 252   # 365 - 52*2 (weekends) - 9 holidays = 365 - 104 - 9 = 365 - 113
+min_date, max_date = get_date_range(selected_db, selected_ticker)
+#start_date = st.sidebar.date_input("Start Date", max_date - timedelta(days=days_in_yr), min_value=min_date, max_value=max_date)
+# lot to be said for choosing last yr of data but...
+#  seemingly more intuitive to show all available data and letter user choose
+
+try:
+    start_date = st.sidebar.date_input("Start Date", min_date, min_value=min_date, max_value=min(max_date, end_date.date()))
+except Exception as e:
+    start_date = st.sidebar.date_input("Start Date", min_date, min_value=min_date, max_value=max_date)
+
+end_date = st.sidebar.date_input("End Date", max_date, min_value=max(min_date.date(), start_date), max_value=max_date)
+# need button or dynamic dependency
+
+
+#start_date = st.sidebar.date_input("Start Date", datetime.now() - timedelta(days=365))
+#end_date = st.sidebar.date_input("End Date", datetime.now())
 
 
 strategy_type = st.sidebar.selectbox(
@@ -101,19 +183,24 @@ def create_indicator_condition():
 
 @st.cache_data
 def load_data(ticker, db_name):
-    conn = sqlite3.connect(db_name)
+    db_path = './shards/'
+    if db_name in nyse_tickers:
+        db_path += 'nyse/'
+    elif db_name in nasdaq_tickers:
+        db_path += 'nasdaq/'
+    else:
+        pass
+    db_path += db_name
+    conn = sqlite3.connect(db_path)
     query = f'SELECT * FROM "{ticker}"'
     df = pd.read_sql_query(query, conn)
     conn.close()
-    try:
-        df['Date'] = pd.to_datetime(df['Date'])
-    except Exception as e:
-        print(e)
-
-        try:
-            df['Date'] = pd.to_datetime(df['Datetime'])
-        except Exception as e:
-            print(e)
+    #print("columns pre mixup")
+    #print(df.columns)
+    #print("=="*22)
+    df['Date'] = df['Date'].str.strip()
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    #print(f"num NaT; {df['Date'].isna().sum()}")
 
     #new_columns = {col: col.replace('.', '_') for col in df.columns if '.' in col}
     #df = df.rename(columns=new_columns)
@@ -288,7 +375,15 @@ def calculate_performance(df, signals, initial_investment):
     sharpe_ratio = np.sqrt(252) * positions['strategy_returns'].mean() / positions['strategy_returns'].std()
     max_drawdown = (positions['portfolio_value'] / positions['portfolio_value'].cummax() - 1).min() * 100
 
-    return positions, total_return, market_return, sharpe_ratio, max_drawdown
+
+    downside_returns = positions['strategy_returns'][positions['strategy_returns'] < 0]
+    downside_deviation = downside_returns.std()
+    sortino_ratio = np.sqrt(252) * positions['strategy_returns'].mean() / downside_deviation if downside_deviation != 0 else 0
+
+
+    pure_profit = positions['portfolio_value'].iloc[-1] - initial_investment
+
+    return positions, total_return, market_return, sharpe_ratio, max_drawdown, sortino_ratio, pure_profit
 
 
 
@@ -363,11 +458,8 @@ def plot_mfi(df, period=mfi_period, oversold=mfi_oversold, overbought=mfi_overbo
 
 
 
-
 st.title("Stock Strategy Backtester")
-
 df = load_data(selected_ticker, selected_db)
-
 
 if strategy_type == "Moving Average Crossover":
     ma_type = st.sidebar.selectbox("MA Type", ["SMA", "EMA", "HMA", "TMA", "RMA"])
@@ -490,9 +582,6 @@ initial_investment = st.sidebar.number_input("Initial Investment ($)", value=100
 
 
 
-#df = load_data(selected_ticker, selected_db)
-#df = df[(df['Date'] >= pd.Timestamp(start_date)) & (df['Date'] <= pd.Timestamp(end_date))]
-#pd.to_datetime(df['Date'])
 # ToDo standardize how date is handled b/t daily data and minute data
 try:
     df = df[(df['Date'] >= pd.Timestamp(start_date)) & (df['Date'] <= pd.Timestamp(end_date))]
@@ -503,17 +592,20 @@ except Exception as e1:
     except Exception as e2:
         print(e2)
 df.set_index('Date', inplace=True)
+df['Date'] = df.index
 
 
 df, signals = implement_strategy(df, strategy_type)
-positions, total_return, market_return, sharpe_ratio, max_drawdown = calculate_performance(df, signals, initial_investment)
+positions, total_return, market_return, sharpe_ratio, max_drawdown, sortino_ratio, pure_profit = calculate_performance(df, signals, initial_investment)
 
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Strategy Return", f"{total_return:.2f}%")
-col2.metric("Market Return", f"{market_return:.2f}%")
-col3.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
-col4.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+market_comp_col, ratio_col, profit_drwdwn_col = st.columns(3)
+market_comp_col.metric("Strategy Return", f"{total_return:.2f}%")
+market_comp_col.metric("Market Return", f"{market_return:.2f}%")
+ratio_col.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+ratio_col.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
+profit_drwdwn_col.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+profit_drwdwn_col.metric("Pure Profit", f"${pure_profit:.2f}")
 
 
 fig = go.Figure()
@@ -631,6 +723,8 @@ elif strategy_type == "Money Flow Index (MFI)":
 
 
 st.subheader("Recent Trade Signals")
+signals_df = None
+#print(df.columns)
 try:
     # ToDo improve this to make more elegant or standardize the naming of Date vs Datetime
     signals_df = pd.DataFrame({
@@ -639,6 +733,8 @@ try:
         'Position': signals['position']
     })
 except Exception as e:
+    #print(f'date- {e}')
+    #print(df.columns)
     try:
         signals_df = pd.DataFrame({
             'Date': df['Datetime'],
@@ -647,47 +743,52 @@ except Exception as e:
         })
     except Exception as e:
         st.warning("Could not load signals")
-signals_df['Signal'] = signals_df['Position'].diff()
-trades = signals_df[signals_df['Signal'] != 0].tail(10)
-trades['Action'] = trades['Signal'].map({1: 'Buy', -1: 'Sell'})
-st.dataframe(trades[['Date', 'Close', 'Action']])
+        #print(f'datetime- {e}')
+        #print(df.columns)
+
+if signals_df is not None:
+    signals_df['Signal'] = signals_df['Position'].diff()
+    trades = signals_df[signals_df['Signal'] != 0].tail(10)
+    trades['Action'] = trades['Signal'].map({1: 'Buy', -1: 'Sell'})
+    st.dataframe(trades[['Date', 'Close', 'Action']])
 
 
 st.subheader("Additional Performance Metrics")
 col1, col2, col3 = st.columns(3)
+if signals_df is not None:
+    trades_all = signals_df[signals_df['Signal'] != 0].copy()
+    trades_all['Next_Close'] = trades_all['Close'].shift(-1)
+    trades_all['Trade_Return'] = (trades_all['Next_Close'] - trades_all['Close']) * trades_all['Signal']
+    win_rate = (trades_all['Trade_Return'] > 0).mean() * 100
 
-trades_all = signals_df[signals_df['Signal'] != 0].copy()
-trades_all['Next_Close'] = trades_all['Close'].shift(-1)
-trades_all['Trade_Return'] = (trades_all['Next_Close'] - trades_all['Close']) * trades_all['Signal']
-win_rate = (trades_all['Trade_Return'] > 0).mean() * 100
+    avg_win = trades_all[trades_all['Trade_Return'] > 0]['Trade_Return'].mean()
+    avg_loss = trades_all[trades_all['Trade_Return'] < 0]['Trade_Return'].mean()
+    profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
 
-avg_win = trades_all[trades_all['Trade_Return'] > 0]['Trade_Return'].mean()
-avg_loss = trades_all[trades_all['Trade_Return'] < 0]['Trade_Return'].mean()
-profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
-
-col1.metric("Win Rate", f"{win_rate:.2f}%")
-col2.metric("Average Win", f"${avg_win:.2f}" if not pd.isna(avg_win) else "N/A")
-col3.metric("Average Loss", f"${avg_loss:.2f}" if not pd.isna(avg_loss) else "N/A")
+    col1.metric("Win Rate", f"{win_rate:.2f}%")
+    col2.metric("Average Win", f"${avg_win:.2f}" if not pd.isna(avg_win) else "N/A")
+    col3.metric("Average Loss", f"${avg_loss:.2f}" if not pd.isna(avg_loss) else "N/A")
 
 st.subheader("Trade Return Distribution")
-fig = go.Figure()
-fig.add_trace(go.Histogram(x=trades_all['Trade_Return'], nbinsx=50))
-fig.update_layout(title='Distribution of Trade Returns',
-                 xaxis_title='Return ($)',
-                 yaxis_title='Frequency')
-st.plotly_chart(fig, use_container_width=True)
+if signals_df is not None:
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(x=trades_all['Trade_Return'], nbinsx=50))
+    fig.update_layout(title='Distribution of Trade Returns',
+                     xaxis_title='Return ($)',
+                     yaxis_title='Frequency')
+    st.plotly_chart(fig, use_container_width=True)
 
-st.subheader("Risk Analysis")
-col1, col2, col3 = st.columns(3)
+    st.subheader("Risk Analysis")
+    col1, col2, col3 = st.columns(3)
 
-annual_volatility = np.sqrt(252) * positions['strategy_returns'].std() * 100
+    annual_volatility = np.sqrt(252) * positions['strategy_returns'].std() * 100
 
-var_95 = np.percentile(positions['strategy_returns'], 5) * 100
-var_99 = np.percentile(positions['strategy_returns'], 1) * 100
+    var_95 = np.percentile(positions['strategy_returns'], 5) * 100
+    var_99 = np.percentile(positions['strategy_returns'], 1) * 100
 
-col1.metric("Annualized Volatility", f"{annual_volatility:.2f}%")
-col2.metric("95% VaR (Daily)", f"{var_95:.2f}%")
-col3.metric("99% VaR (Daily)", f"{var_99:.2f}%")
+    col1.metric("Annualized Volatility", f"{annual_volatility:.2f}%")
+    col2.metric("95% VaR (Daily)", f"{var_95:.2f}%")
+    col3.metric("99% VaR (Daily)", f"{var_99:.2f}%")
 
 
 st.subheader("Download Data")
@@ -697,21 +798,21 @@ col1, col2 = st.columns(2)
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
-trades_csv = convert_df_to_csv(trades_all)
-signals_csv = convert_df_to_csv(signals_df)
+if signals_df is not None:
+    trades_csv = convert_df_to_csv(trades_all)
+    signals_csv = convert_df_to_csv(signals_df)
 
-col1.download_button(
-    label="Download All Trades",
-    data=trades_csv,
-    file_name='trades.csv',
-    mime='text/csv',
-)
+    col1.download_button(
+        label="Download All Trades",
+        data=trades_csv,
+        file_name='trades.csv',
+        mime='text/csv',
+    )
 
-col2.download_button(
-    label="Download All Signals",
-    data=signals_csv,
-    file_name='signals.csv',
-    mime='text/csv',
-)
+    col2.download_button(
+        label="Download All Signals",
+        data=signals_csv,
+        file_name='signals.csv',
+        mime='text/csv',
+    )
 
-#using yfinance_downloader.py as ex, write a function that will open given database (passed as parameter) and chk for the given tables for latest info by date column, compare to current date, then find- obtain- and update db with any missing data
