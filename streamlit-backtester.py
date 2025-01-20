@@ -72,7 +72,7 @@ def get_date_range(db_name, ticker):
     else:
         pass
     db_path += db_name
-    print(f'db path {db_path}')
+    #print(f'db path {db_path}')
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -354,6 +354,7 @@ def implement_strategy(df, strategy_type):
     return df, signals
 
 
+
 def calculate_performance(df, signals, initial_investment):
     slippage_factor = 1 - slippage
 
@@ -363,11 +364,39 @@ def calculate_performance(df, signals, initial_investment):
     # calculate time unit returns // either daily or minutes depending on db
     df['returns'] = pd.to_numeric(df['Close']).pct_change()
 
-    positions['strategy_returns'] = positions['position'].shift(1) * df['returns'] * slippage_factor
+    positions['strategy_returns'] = positions['position'].shift(1) * df['returns'] ##* slippage_factor
     positions['strategy_returns'] = positions['strategy_returns'].fillna(0)
-
     positions['cumulative_returns'] = (1 + positions['strategy_returns']).cumprod()
+    positions['position_change'] = positions['position'].diff()
+    positions['trade_value'] = abs(positions['position_change']) * df['Close']
+    #positions['slippage_loss'] = positions['trade_value'] * slippage
+    #positions['cumulative_slippage_loss'] = positions['slippage_loss'].cumsum()
+    #total_slippage_loss = positions['cumulative_slippage_loss'].iloc[-1]
+
+
+    if fee_type == 'Per Transaction':
+        # Apply fees only when there's a trade (position_change != 0)
+        positions['transaction_fees'] = np.where(
+            positions['position_change'] != 0,
+            flat_fee + (positions['trade_value'] * perc_fee),
+            0
+        )
+
+    #elif fee_type == 'Per Share':
+    #    positions['transaction_fees'] = np.where(
+    #        positions['position_change'] != 0,
+    #        (flat_fee * abs(positions['position_change'])) + (positions['trade_value'] * perc_fee),
+    #        0
+    #    )
+
+    positions['cumulative_fees'] = positions['transaction_fees'].cumsum()
+
+    ##positions['strategy_returns_after_fees'] = positions['strategy_returns'] - (positions['transaction_fees'] / (positions['trade_value'].shift(1) + initial_investment))
+    ##positions['cumulative_returns'] = (1 + positions['strategy_returns_after_fees']).cumprod()
     positions['cumulative_market_returns'] = (1 + df['returns']).cumprod()
+
+    #positions['cumulative_returns'] = (1 + positions['strategy_returns']).cumprod()
+    #positions['cumulative_market_returns'] = (1 + df['returns']).cumprod()
 
     positions['portfolio_value'] = initial_investment * positions['cumulative_returns']
     positions['market_value'] = initial_investment * positions['cumulative_market_returns']
@@ -382,11 +411,13 @@ def calculate_performance(df, signals, initial_investment):
     downside_deviation = downside_returns.std()
     sortino_ratio = np.sqrt(252) * positions['strategy_returns'].mean() / downside_deviation if downside_deviation != 0 else 0
 
+    total_fees = positions['cumulative_fees'].iloc[-1]
+    pure_profit = positions['portfolio_value'].iloc[-1] - initial_investment #- total_fees
+    total_slippage_loss =  total_return * slippage
+    total_fees = total_return * (100 / (1- slippage)*100)
+    place_holder = float('nan')
 
-    pure_profit = positions['portfolio_value'].iloc[-1] - initial_investment
-
-    return positions, total_return, market_return, sharpe_ratio, max_drawdown, sortino_ratio, pure_profit
-
+    return positions, total_return, market_return, sharpe_ratio, max_drawdown, sortino_ratio, pure_profit, place_holder, place_holder
 
 
 
@@ -581,6 +612,23 @@ initial_investment = st.sidebar.number_input("Initial Investment ($)", value=100
 raw_slippage = st.sidebar.number_input("Slippage Percentage", value=1.0, step=1.0)
 slippage = raw_slippage/100
 
+fee_type = st.sidebar.selectbox(
+    "Select Fee Type",
+    ("Per Transaction"),
+    #("Per Transaction", "Per Share"),
+    help="Choose whether the fee should be applied per share or per transaction"
+)
+per_suffix = ""
+flat_fee   = 0
+if fee_type == 'Per Share':
+    flat_fee = st.sidebar.number_input("Flat Trade Fee ($) Per Share", value=0.25, step=0.25)
+    per_suffix = "Share"
+elif fee_type == 'Per Transaction':
+    flat_fee = st.sidebar.number_input("Flat Trade Fee ($) Per Transaction", value=15, step=5)
+    per_suffix = "Transaction"
+
+perc_fee = st.sidebar.number_input(f"Percent Trade Fee (%) Per {per_suffix}", value=1.0, step=1.0)
+
 
 
 
@@ -600,16 +648,19 @@ df['Date'] = df.index
 
 
 df, signals = implement_strategy(df, strategy_type)
-positions, total_return, market_return, sharpe_ratio, max_drawdown, sortino_ratio, pure_profit = calculate_performance(df, signals, initial_investment)
+positions, total_return, market_return, sharpe_ratio, max_drawdown, sortino_ratio, pure_profit, total_fees, total_slippage_loss = calculate_performance(df, signals, initial_investment)
 
 
-market_comp_col, ratio_col, profit_drwdwn_col = st.columns(3)
+market_comp_col, ratio_col, profit_drwdwn_col, fee_slip_col = st.columns(4)
 market_comp_col.metric("Strategy Return", f"{total_return:.2f}%")
 market_comp_col.metric("Market Return", f"{market_return:.2f}%")
 ratio_col.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
 ratio_col.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
 profit_drwdwn_col.metric("Max Drawdown", f"{max_drawdown:.2f}%")
 profit_drwdwn_col.metric("Pure Profit", f"${pure_profit:.2f}")
+fee_slip_col.metric("Total Transaction Fees", f"${total_fees:.2f}")
+fee_slip_col.metric("Total Slippage Loss", f"${total_slippage_loss:.2f}")
+
 
 
 fig = go.Figure()
