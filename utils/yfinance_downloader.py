@@ -46,7 +46,7 @@ def get_latest_date(database_path, table_name, date_column='Date'):
 #  then calcs missing values where appropriate
 #    vs recalc all or only calc on new data leaving gaps where min # of days not met
 #@profile
-def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_date="", get_minutes=False, _shard_on_ticker=True, _def_db_basename="stock_data", _ticker_unknown_state=True, _output_dir="", _dl_slack_days=2):
+def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_date="", get_minutes=False, _shard_on_ticker=True, _def_db_basename="stock_data", _ticker_unknown_state=True, _output_dir="", _dl_slack_days=2, _skip_indicators=False):
 
     # use start date as current date - 30 d
     # end date as current date
@@ -84,9 +84,13 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
             if _output_dir:
                 db_name = _output_dir + "/" + db_name if not _output_dir.endswith("/") else _output_dir + db_name
         if path.exists(db_name):
+            print(f"attempting to get latest date for {db_name}")
             existing_latest_date = get_latest_date(database_path=db_name, table_name=ticker, date_column=date_vs_datetime)
             try:
-                ex_latest_date_obj = datetime.strptime(existing_latest_date, "%Y-%m-%d %H:%M:%S").date()
+                date_format_str = "%Y-%m-%d %H:%M:%S"
+                if '+' in existing_latest_date:
+                    date_format_str += "%z"
+                ex_latest_date_obj = datetime.strptime(existing_latest_date, date_format_str).date() #datetime.strptime(existing_latest_date, "%Y-%m-%d %H:%M:%S").date()
             except Exception as e:
 
                 try:
@@ -102,6 +106,12 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
 
         # minutes vs daily info download logic
         if get_minutes:
+            if existing_latest_date:
+                if ex_latest_date_obj >= end_date_obj.date()-timedelta(days=_dl_slack_days):
+                    print(f"Skipping {ticker}, already up to date")
+                    continue
+                #else:
+                # add logic to make start date stop at latest date from pick up
             start_date_obj = end_date_obj - timedelta(days=yahoo_efficient_lkbk_lmt)
             current_start_obj = start_date_obj #
 
@@ -141,14 +151,16 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                     tickers_to_dbl_chk.append(ticker)
                     continue
 
+            data = data.xs(ticker, level=1, axis=1)
 
             sleep(rate_limit_delay)
-        if data.empty:
+
+        if data is None or data.empty:
             print(f"Was unable to obtain data for ticker {ticker}")
             tickers_to_dbl_chk.append(ticker)
             continue
         # strip multi index, move ticker to column instead of row
-        data = data.xs(ticker, level=1, axis=1)
+
         data.drop_duplicates(inplace = True)
         conn = None
 
@@ -156,36 +168,37 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
             # dynamically apply all indicators
             # since some of the indicators written for earlier vers of pandas
             #  try default way of append=True,that fails, try pandas.concat, that fails we mark it and move on
-            indicators_to_concat = []
-            for cur_indicator in filtered_ta_indicators:
-                #print(f"Attempting to apply indicator       {cur_indicator}")
-                ta_function = getattr(data.ta, cur_indicator)
-                try:
-                    ta_function(append=True)
-                    continue
-                except Exception as e:
-                    print(e)
+            if not _skip_indicators:
+                indicators_to_concat = []
+                for cur_indicator in filtered_ta_indicators:
+                    #print(f"Attempting to apply indicator       {cur_indicator}")
+                    ta_function = getattr(data.ta, cur_indicator)
                     try:
-                        indicator_res = ta_function(append=False)
-                        indicators_to_concat.append( indicator_res )
-                        del indicator_res
-
+                        ta_function(append=True)
+                        continue
                     except Exception as e:
                         print(e)
+                        try:
+                            indicator_res = ta_function(append=False)
+                            indicators_to_concat.append( indicator_res )
+                            del indicator_res
 
-                del ta_function
-                gc.collect()
+                        except Exception as e:
+                            print(e)
 
-            if len(indicators_to_concat)>0:
-                #data = pd.concat([data, indicator_res], axis=1)
-                indicators_to_concat.insert(0, data)
-                try:
-                    data = pd.concat(indicators_to_concat, axis=1)
-                except Exception as e:
-                    print(e)
-                    tickers_to_dbl_chk.append(ticker)
-                del indicators_to_concat
-                gc.collect()
+                    del ta_function
+                    gc.collect()
+
+                if len(indicators_to_concat)>0:
+                    #data = pd.concat([data, indicator_res], axis=1)
+                    indicators_to_concat.insert(0, data)
+                    try:
+                        data = pd.concat(indicators_to_concat, axis=1)
+                    except Exception as e:
+                        print(e)
+                        tickers_to_dbl_chk.append(ticker)
+                    del indicators_to_concat
+                    gc.collect()
 
 
             #print(len(data.columns))
@@ -411,18 +424,26 @@ if __name__ == '__main__':
     #missing_nyse_tickers_rnd1 = ['QUAD', 'LON', 'LXFR', 'GWH', 'SOS', 'XYF', 'OPAD', 'TSQ', 'TISI', 'SITC', 'AHT', 'BIO-B', 'BTCM', 'NOTE', 'SJT', 'VNCE', 'CHMI', 'RFL', 'CCM', 'SUP', 'WOW', 'BW', 'PINE', 'BODI', 'ZVIA', 'KORE', 'ARCH', 'CPS', 'GATO', 'BKKT', 'CBAN', 'SOL', 'PRT', 'IH', 'MTR', 'AXR', 'MKFG', 'OCFT', 'HYAC', 'DTC', 'BKSY', 'BGSF', 'VATE', 'SPRU', 'TPVG', 'BRT', 'GHG', 'VHC', 'NRDY', 'BEST', 'MITT', 'NVRO', 'MOG-B', 'ONTF', 'KFS', 'DLNG', 'JACS', 'EQC', 'ATE', 'AKA', 'EARN', 'CIO', 'FEDU', 'NEUE', 'OIS', 'NUS', 'AP', 'ENFY', 'AOMR', 'SES', 'SBXD', 'NL', 'AZUL', 'ZEPP', 'BEDU', 'FET', 'CATO', 'ANVS', 'MDV', 'CVEO', 'FRGE', 'BKDT', 'PERF', 'CRNG', 'GPMT', 'HOUS', 'GEC', 'ALTG', 'KUKE', 'MEC', 'MOGU', 'DOUG', 'WBX', 'NTZ', 'BNED', 'EQS', 'SST', 'VPG', 'DBI', 'NRT', 'YSG', 'GHI', 'LFT', 'CLBR', 'SRG', 'TSE', 'CNF', 'VOC', 'AMTD', 'PNST', 'ZH', 'CULP', 'SMRT', 'LND', 'ENLC', 'NMG', 'NE-WSA', 'PSTL', 'NC', 'EB', 'EVC', 'SKIL', 'KNOP', 'AVD', 'RNGR', 'GROV', 'CBNA', 'LITB', 'RBOT', 'NRGV', 'ARL', 'HRTG', 'GTN-A', 'SKLZ', 'BYON', 'MTW', 'MSB', 'CLPR', 'MED', 'WHG', 'RPT', 'CHGG', 'SPCE', 'TLYS', 'SAR', 'WTI', 'FENG', 'PSQH', 'TCI', 'OOMA', 'SRFM', 'FOA', 'SPIR', 'FREY', 'HLLY', 'CRT', 'ORN', 'NYC', 'PKE', 'MG', 'DM', 'RMAX', 'AMPX', 'TBI', 'TG', 'PHX', 'AMPY', 'ONIT', 'ONL', 'LAW', 'CCRD', 'CMCM', 'COOK', 'SMHI', 'NINE', 'SMAR', 'ALUR', 'ANRO', 'MPLN', 'TBN', 'XIN', 'AEVA', 'MX', 'AMWL', 'ACRE', 'NGS', 'GTN', 'MBI', 'STEM', 'RM', 'HVT', 'LICY', 'FF', 'NREF', 'HBB', 'BHR', 'ACR', 'ODV', 'DSX', 'DHX', 'STG', 'OWLT', 'HSHP', 'SRI', 'GCTS', 'LOCL', 'BPT', 'UFI', 'B', 'ADCT', 'BARK', 'BSS', 'MPX', 'CIA', 'SRL', 'SQNS', 'PVL', 'ENZ', 'FTK', 'HVT-A', 'IPI', 'LANV', 'VLN']
     #missing_nyse_tickers_rnd2 = ['ARCH', 'ATE', 'B', 'BIO-B', 'BKDT', 'BSS', 'ENLC', 'GATO', 'GEC', 'HVT-A', 'LON', 'MOG-B', 'NE-WSA', 'SITC', 'SMAR']
     #missing_nyse_tickers_rnd3 = ['ARCH', 'ATE', 'B', 'BIO-B', 'BKDT', 'BSS', 'ENLC', 'GATO', 'GEC', 'HVT-A', 'LON', 'MOG-B', 'NE-WSA', 'SITC', 'SMAR']
-    from shards.nyse_list_2025 import nyse_tickers
-    nyse_dblchk = download_and_store_stock_data_minutes(nyse_tickers, get_minutes=False, _output_dir="shards/nyse/", _dl_slack_days=15)
+    ##from nyse_list_2025 import nyse_tickers
+    ##nyse_tickers = list(set(nyse_tickers))
+    ##missingnyse1 = ['AACT', 'AAM', 'AAMI', 'AC', 'ACCO', 'ACEL', 'ACR', 'ACRE', 'ADCT', 'AEVA', 'AGM-A', 'AGS', 'AHT', 'AKA', 'ALTG', 'ALUR', 'AMBC', 'AMPS', 'AMPX', 'AMPY', 'AMTB', 'AMTD', 'AMWL', 'ANRO', 'ANVS', 'AOMR', 'AP', 'ARCH', 'ARL', 'ASA', 'ASC', 'ASIX', 'ATE', 'AUNA', 'AVD', 'AVNS', 'AXL', 'AXR', 'AZUL', 'B', 'BALY', 'BALY-T', 'BARK', 'BBAI', 'BBW', 'BDN', 'BEDU', 'BEST', 'BFLY', 'BGS', 'BGSF', 'BH', 'BH-A', 'BHR', 'BKKT', 'BKSY', 'BLND', 'BNED', 'BOC', 'BODI', 'BPT', 'BRCC', 'BRDG', 'BRSP', 'BRT', 'BSS', 'BTCM', 'BW', 'BWMX', 'BXC', 'BYON', 'BZH', 'CAL', 'CANG', 'CAPL', 'CATO', 'CBAN', 'CBL', 'CBNA', 'CCM', 'CCO', 'CCRD', 'CEIX', 'CHCT', 'CHGG', 'CHMI', 'CHPT', 'CIA', 'CINT', 'CIO', 'CION', 'CLB', 'CLBR', 'CLCO', 'CLDT', 'CLPR', 'CLW', 'CMCM', 'CMP', 'CMTG', 'CNF', 'COOK', 'CPAC', 'CPF', 'CPS', 'CRD-A', 'CRD-B', 'CRNG', 'CRT', 'CSV', 'CTO', 'CTV', 'CULP', 'CURV', 'CVEO', 'CVLG', 'CYD', 'CYH', 'DAO', 'DBI', 'DDD', 'DDL', 'DEC', 'DHX', 'DIN', 'DLNG', 'DM', 'DNA', 'DOUG', 'DRD', 'DSX', 'DTC', 'EAF', 'EARN', 'EB', 'EBF', 'EBS', 'ECO', 'ECVT', 'EGY', 'EHAB', 'ENFY', 'ENLC', 'ENZ', 'EQBK', 'EQC', 'EQS', 'EQV', 'ETD', 'ETWO', 'EVC', 'EVTL', 'EXK', 'FC', 'FEDU', 'FENG', 'FET', 'FF', 'FNA', 'FOA', 'FPH', 'FPI', 'FREY', 'FRGE', 'FTK', 'FVR', 'GATO', 'GBLI', 'GCI', 'GCO', 'GCTS', 'GDOT', 'GEC', 'GES', 'GFR', 'GHG', 'GHI', 'GHLD', 'GHM', 'GIC', 'GMRE', 'GNE', 'GNK', 'GNTY', 'GOTU', 'GPMT', 'GPRK', 'GRNT', 'GROV', 'GSL', 'GTN', 'GTN-A', 'GWH', 'HBB', 'HIPO', 'HKD', 'HLF', 'HLLY', 'HOUS', 'HOV', 'HPP', 'HRTG', 'HSHP', 'HUYA', 'HVT', 'HVT-A', 'HY', 'HYAC', 'HZO', 'IH', 'IIIN', 'INN', 'IPI', 'IVR', 'JACS', 'JELD', 'JILL', 'JMIA', 'KFS', 'KIND', 'KNOP', 'KODK', 'KOP', 'KORE', 'KREF', 'KUKE', 'LAAC', 'LAC', 'LANV', 'LAW', 'LDI', 'LFT', 'LICY', 'LITB', 'LND', 'LOCL', 'LON', 'LVWR', 'LXFR', 'LXU', 'LZM', 'MAGN', 'MATV', 'MAX', 'MBI', 'MCB', 'MCS', 'MDV', 'MEC', 'MED', 'MEG', 'MEI', 'MG', 'MITT', 'MKFG', 'MLP', 'MLR', 'MOGU', 'MOV', 'MPLN', 'MPX', 'MSB', 'MSC', 'MTAL', 'MTR', 'MTUS', 'MTW', 'MUX', 'MX', 'MYE', 'MYTE', 'NAT', 'NBR', 'NC', 'NCDL', 'NE-WSA', 'NEP', 'NEUE', 'NEXA', 'NGL', 'NGS', 'NGVC', 'NINE', 'NL', 'NLOP', 'NMG', 'NOA', 'NOAH', 'NOTE', 'NOVA', 'NPK', 'NPKI', 'NRDY', 'NREF', 'NRGV', 'NRT', 'NTZ', 'NUS', 'NUVB', 'NVRI', 'NVRO', 'NYC', 'OCFT', 'ODC', 'ODV', 'OEC', 'OIS', 'OLP', 'ONIT', 'ONL', 'ONTF', 'OOMA', 'OPAD', 'OPY', 'ORC', 'ORN', 'OWLT', 'PACK', 'PBT', 'PDS', 'PERF', 'PFLT', 'PHX', 'PINE', 'PKE', 'PKST', 'PLOW', 'PLYM', 'PNNT', 'PNST', 'PRA', 'PRLB', 'PRT', 'PSBD', 'PSQH', 'PSTL', 'PVL', 'QBTS', 'QD', 'QUAD', 'RBOT', 'RDW', 'RERE', 'REX', 'RFL', 'RGR', 'RM', 'RMAX', 'RNGR', 'RPT', 'RSKD', 'RWT', 'RYAM', 'RYI', 'SAR', 'SB', 'SBSI', 'SBXD', 'SCM', 'SD', 'SES', 'SGU', 'SITC', 'SJT', 'SKIL', 'SKLZ', 'SLQT', 'SMAR', 'SMBK', 'SMC', 'SMHI', 'SMP', 'SMRT', 'SNDA', 'SOL', 'SOS', 'SPCE', 'SPIR', 'SPLP', 'SPMC', 'SPRU', 'SQ', 'SQNS', 'SRFM', 'SRG', 'SRI', 'SRL', 'SST', 'STEM', 'STG', 'SUP', 'SXC', 'TBI', 'TBN', 'TCI', 'TEN', 'TG', 'TISI', 'TIXT', 'TK', 'TLYS', 'TPVG', 'TRAK', 'TRC', 'TRTX', 'TSE', 'TSQ', 'TTI', 'TV', 'TWI', 'TXO', 'TYG', 'UAN', 'UFI', 'UHT', 'UIS', 'USNA', 'UTL', 'UVE', 'VATE', 'VEL', 'VHC', 'VHI', 'VLN', 'VNCE', 'VOC', 'VPG', 'VTS', 'WBX', 'WDH', 'WHG', 'WLKP', 'WNC', 'WOLF', 'WOW', 'WSR', 'WTI', 'XIN', 'XPER', 'XPOF', 'XYF', 'YALA', 'YEXT', 'YRD', 'YSG', 'ZEPP', 'ZH', 'ZIP', 'ZKH', 'ZVIA']
+    ##missingnyse3 = ['AGM-A', 'ARCH', 'ATE', 'B', 'BSS', 'CEIX', 'ENLC', 'GATO', 'GEC', 'LON', 'NE-WSA', 'NEP', 'SMAR', 'SQ']
+    ##missingnyse4 = ['AGM-A', 'ARCH', 'ATE', 'B', 'BSS', 'CEIX', 'ENLC', 'GATO', 'GEC', 'LON', 'NE-WSA', 'NEP', 'SMAR', 'SQ']
+    ##nyse_dblchk = download_and_store_stock_data_minutes(missingnyse3, get_minutes=True, _output_dir="nyse_feb/", _skip_indicators=True, _dl_slack_days=5)
     print("NYSE - Data download and storage complete with technical indicators!")
+
+
+    #missingnyse2 = ['AACT', 'AAM', 'AAMI', 'AC', 'ACCO', 'ACEL', 'ACR', 'ACRE', 'ADCT', 'AEVA', 'AGM-A', 'AGS', 'AHT', 'AKA', 'ALTG', 'ALUR', 'AMBC', 'AMPS', 'AMPX', 'AMPY', 'AMTB', 'AMTD', 'AMWL', 'ANRO', 'ANVS', 'AOMR', 'AP', 'ARCH', 'ARL', 'ASA', 'ASC', 'ASIX', 'ATE', 'AUNA', 'AVD', 'AVNS', 'AXL', 'AXR', 'AZUL', 'B', 'BALY', 'BALY-T', 'BARK', 'BBAI', 'BBW', 'BDN', 'BEDU', 'BEST', 'BFLY', 'BGS', 'BGSF', 'BH', 'BH-A', 'BHR', 'BKKT', 'BKSY', 'BLND', 'BNED', 'BOC', 'BODI', 'BPT', 'BRCC', 'BRDG', 'BRSP', 'BRT', 'BSS', 'BTCM', 'BW', 'BWMX', 'BXC', 'BYON', 'BZH', 'CAL', 'CANG', 'CAPL', 'CATO', 'CBAN', 'CBL', 'CBNA', 'CCM', 'CCO', 'CCRD', 'CEIX', 'CHCT', 'CHGG', 'CHMI', 'CHPT', 'CIA', 'CINT', 'CIO', 'CION', 'CLB', 'CLBR', 'CLCO', 'CLDT', 'CLPR', 'CLW', 'CMCM', 'CMP', 'CMTG', 'CNF', 'COOK', 'CPAC', 'CPF', 'CPS', 'CRD-A', 'CRD-B', 'CRNG', 'CRT', 'CSV', 'CTO', 'CTV', 'CULP', 'CURV', 'CVEO', 'CVLG', 'CYD', 'CYH', 'DAO', 'DBI', 'DDD', 'DDL', 'DEC', 'DHX', 'DIN', 'DLNG', 'DM', 'DNA', 'DOUG', 'DRD', 'DSX', 'DTC', 'EAF', 'EARN', 'EB', 'EBF', 'EBS', 'ECO', 'ECVT', 'EGY', 'EHAB', 'ENFY', 'ENLC', 'ENZ', 'EQBK', 'EQC', 'EQS', 'EQV', 'ETD', 'ETWO', 'EVC', 'EVTL', 'EXK', 'FC', 'FEDU', 'FENG', 'FET', 'FF', 'FNA', 'FOA', 'FPH', 'FPI', 'FREY', 'FRGE', 'FTK', 'FVR', 'GATO', 'GBLI', 'GCI', 'GCO', 'GCTS', 'GDOT', 'GEC', 'GES', 'GFR', 'GHG', 'GHI', 'GHLD', 'GHM', 'GIC', 'GMRE', 'GNE', 'GNK', 'GNTY', 'GOTU', 'GPMT', 'GPRK', 'GRNT', 'GROV', 'GSL', 'GTN', 'GTN-A', 'GWH', 'HBB', 'HIPO', 'HKD', 'HLF', 'HLLY', 'HOUS', 'HOV', 'HPP', 'HRTG', 'HSHP', 'HUYA', 'HVT', 'HVT-A', 'HY', 'HYAC', 'HZO', 'IH', 'IIIN', 'INN', 'IPI', 'IVR', 'JACS', 'JELD', 'JILL', 'JMIA', 'KFS', 'KIND', 'KNOP', 'KODK', 'KOP', 'KORE', 'KREF', 'KUKE', 'LAAC', 'LAC', 'LANV', 'LAW', 'LDI', 'LFT', 'LICY', 'LITB', 'LND', 'LOCL', 'LON', 'LVWR', 'LXFR', 'LXU', 'LZM', 'MAGN', 'MATV', 'MAX', 'MBI', 'MCB', 'MCS', 'MDV', 'MEC', 'MED', 'MEG', 'MEI', 'MG', 'MITT', 'MKFG', 'MLP', 'MLR', 'MOGU', 'MOV', 'MPLN', 'MPX', 'MSB', 'MSC', 'MTAL', 'MTR', 'MTUS', 'MTW', 'MUX', 'MX', 'MYE', 'MYTE', 'NAT', 'NBR', 'NC', 'NCDL', 'NE-WSA', 'NEP', 'NEUE', 'NEXA', 'NGL', 'NGS', 'NGVC', 'NINE', 'NL', 'NLOP', 'NMG', 'NOA', 'NOAH', 'NOTE', 'NOVA', 'NPK', 'NPKI', 'NRDY', 'NREF', 'NRGV', 'NRT', 'NTZ', 'NUS', 'NUVB', 'NVRI', 'NVRO', 'NYC', 'OCFT', 'ODC', 'ODV', 'OEC', 'OIS', 'OLP', 'ONIT', 'ONL', 'ONTF', 'OOMA', 'OPAD', 'OPY', 'ORC', 'ORN', 'OWLT', 'PACK', 'PBT', 'PDS', 'PERF', 'PFLT', 'PHX', 'PINE', 'PKE', 'PKST', 'PLOW', 'PLYM', 'PNNT', 'PNST', 'PRA', 'PRLB', 'PRT', 'PSBD', 'PSQH', 'PSTL', 'PVL', 'QBTS', 'QD', 'QUAD', 'RBOT', 'RDW', 'RERE', 'REX', 'RFL', 'RGR', 'RM', 'RMAX', 'RNGR', 'RPT', 'RSKD', 'RWT', 'RYAM', 'RYI', 'SAR', 'SB', 'SBSI', 'SBXD', 'SCM', 'SD', 'SES', 'SGU', 'SITC', 'SJT', 'SKIL', 'SKLZ', 'SLQT', 'SMAR', 'SMBK', 'SMC', 'SMHI', 'SMP', 'SMRT', 'SNDA', 'SOL', 'SOS', 'SPCE', 'SPIR', 'SPLP', 'SPMC', 'SPRU', 'SQ', 'SQNS', 'SRFM', 'SRG', 'SRI', 'SRL', 'SST', 'STEM', 'STG', 'SUP', 'SXC', 'TBI', 'TBN', 'TCI', 'TEN', 'TG', 'TISI', 'TIXT', 'TK', 'TLYS', 'TPVG', 'TRAK', 'TRC', 'TRTX', 'TSE', 'TSQ', 'TTI', 'TV', 'TWI', 'TXO', 'TYG', 'UAN', 'UFI', 'UHT', 'UIS', 'USNA', 'UTL', 'UVE', 'VATE', 'VEL', 'VHC', 'VHI', 'VLN', 'VNCE', 'VOC', 'VPG', 'VTS', 'WBX', 'WDH', 'WHG', 'WLKP', 'WNC', 'WOLF', 'WOW', 'WSR', 'WTI', 'XIN', 'XPER', 'XPOF', 'XYF', 'YALA', 'YEXT', 'YRD', 'YSG', 'ZEPP', 'ZH', 'ZIP', 'ZKH', 'ZVIA']
 
 
     #missing_tickers_round1 = ['YHNA', 'IMKT-A', 'WRD', 'MLAC', 'SPHL', 'SPHA', 'PONY', 'VCIC', 'POLE', 'YSXT', 'CHAR', 'ALDF', 'HUHU', 'NOEM', 'SAG', 'ZAP', 'CCIR', 'GANX', 'GSRT', 'NAMI', 'OACC', 'LSE', 'CGTL', 'FGL', 'YAAS', 'DEVS', 'JUNS', 'BSII', 'LPBB', 'CAPN', 'HIT', 'ORIS', 'LNKS', 'NCEW', 'SFHG', 'ACOG', 'ZSPC', 'FBLA', 'HSPT', 'SNYR', 'DYNX', 'PLRZ', 'GELS', 'SNRE', 'RDAC', 'SEPN', 'IZTC', 'RADX', 'TAVI', 'BACQ', 'LBGJ', 'PTLE', 'BEAG', 'DRDB', 'TDAC', 'NBIS']
     #missing_nasdaq_tickers_rnd1 = ['BHRB', 'GAUZ', 'IMKT-A', 'POOL', 'REG', 'SSSS', 'SVCO', 'TDAC']
     #missing_nasdaq_tickers_rnd2 = ['GODN', 'HTLF', 'IMKT-A', 'LATG', 'TDAC', 'USAP']
-    #from shards.nasdaq_list_2025 import nasdaq_tickers
-    #nasdaq_dblchk = download_and_store_stock_data_minutes(nasdaq_tickers, get_minutes=False, _output_dir="shards/nasdaq/", _dl_slack_days=5)
-    #print("NASDAQ - Data download and storage complete with technical indicators!")
-
+    ##from nasdaq_list_2025 import nasdaq_tickers
+    ##nasdaq_tickers = list(set(nasdaq_tickers))
+    ##nasdaq_dblchk = download_and_store_stock_data_minutes(nasdaq_tickers, get_minutes=True, _output_dir="nasdaq_feb/", _skip_indicators=True, _dl_slack_days=5)
+    ##print("NASDAQ - Data download and storage complete with technical indicators!")
+    #nassdaq_missing = ['HUDA', 'IMKT-A', 'TDAC']
     ## experiments trying to find / fix memory leak,
     ##   issue appears to be with dynamic application of indicator functions and freeing the memory after use there
     ##   pandas_ta will BREAK on pandas 3.0
