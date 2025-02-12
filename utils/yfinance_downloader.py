@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from multiprocessing import Pool, cpu_count
 from os import listdir, getcwd, path
 from time import sleep
 from traceback import print_exc
@@ -9,6 +10,7 @@ from traceback import print_exc
 
 import gc
 import sqlite3
+import warnings
 
 import pandas as pd
 import pandas_ta as ta
@@ -46,7 +48,9 @@ def get_latest_date(database_path, table_name, date_column='Date'):
 #  then calcs missing values where appropriate
 #    vs recalc all or only calc on new data leaving gaps where min # of days not met
 #@profile
-def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_date="", get_minutes=False, _shard_on_ticker=True, _def_db_basename="stock_data", _ticker_unknown_state=True, _output_dir="", _dl_slack_days=2, _skip_indicators=False):
+def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_date="", get_minutes=False,
+    _shard_on_ticker=True, _def_db_basename="stock_data", _ticker_unknown_state=True,
+    _output_dir="", _dl_slack_days=2, _skip_indicators=False, _cpu_cores = 4):
 
     # use start date as current date - 30 d
     # end date as current date
@@ -72,8 +76,8 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
     indicators_to_skip.extend( utility_indicators )
     indicators_to_skip.extend( problematic_indicators )
 
-    all_ta_indicators = pd.DataFrame().ta.indicators(as_list=True) # 143 before filtering
-    filtered_ta_indicators = [indicator for indicator in all_ta_indicators if indicator not in indicators_to_skip] # 124 indicators
+    all_ta_indicators = pd.DataFrame().ta.indicators(as_list=True) # don't do it the normal way b/c it name doesn't match get this..., exclude=indicators_to_skip) # 143 before filtering
+    filtered_ta_indicators = [indicator for indicator in all_ta_indicators if indicator.lower() not in indicators_to_skip] # 124 indicators
     date_vs_datetime = "Datetime" if get_minutes else "Date"
 
     for ticker in tickers:
@@ -152,8 +156,9 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                     continue
 
             data = data.xs(ticker, level=1, axis=1)
-
-            sleep(rate_limit_delay)
+            if _skip_indicators:
+                sleep(rate_limit_delay)
+            # else indicators will take long enough don't need hard delay to avoid rate limiting yahoo finance api
 
         if data is None or data.empty:
             print(f"Was unable to obtain data for ticker {ticker}")
@@ -161,7 +166,7 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
             continue
         # strip multi index, move ticker to column instead of row
 
-        data.drop_duplicates(inplace = True)
+        data.drop_duplicates(inplace = True) # for rows
         conn = None
 
         try:
@@ -170,6 +175,11 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
             #  try default way of append=True,that fails, try pandas.concat, that fails we mark it and move on
             if not _skip_indicators:
                 indicators_to_concat = []
+                indicators_to_concat = apply_indicators_parallel(data, filtered_ta_indicators)
+                #= pool.starmap(apply_indicator, [(data, indicator) for indicator in filtered_ta_indicators])
+                #with Pool(_cpu_cores) as pool:
+                #    indicators_to_concat = pool.starmap(apply_indicator, [(data, indicator) for indicator in indicators])
+                '''
                 for cur_indicator in filtered_ta_indicators:
                     #print(f"Attempting to apply indicator       {cur_indicator}")
                     ta_function = getattr(data.ta, cur_indicator)
@@ -189,6 +199,7 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                     del ta_function
                     gc.collect()
 
+
                 if len(indicators_to_concat)>0:
                     #data = pd.concat([data, indicator_res], axis=1)
                     indicators_to_concat.insert(0, data)
@@ -199,74 +210,31 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                         tickers_to_dbl_chk.append(ticker)
                     del indicators_to_concat
                     gc.collect()
+                '''
+                for result in indicators_to_concat:
+                    headers = result.columns if isinstance(result, type(pd.DataFrame())) else result.name if isinstance(result, type(pd.Series()) ) else None
+                    #indicator_added = False
+                    if result is not None:
+                        try:
+                            #if data.index.equals(result.index):
+                            if 'Date' in data.columns and 'Date' in result.columns \
+                            and data['Date'].equals(result['Date']):
+                                data = pd.concat([data, result], axis=1)
+                                #indicator_added = True
+                            else:
+                                print(f"Skipping concatenation: indices do not match.\n{headers}")
+                            data = pd.concat([data, result], axis=1)
+
+                        except Exception as e:
+                            print(e)
+                    print(f"Skipping concatenation: no result data.\n{headers}")
+                #data = data.T.drop_duplicates().T # remove duplicate columns
+                ##data = data.drop(columns=['DMP_14']) # not sure why we duplicate ere
+                data.columns = pd.Index([f"{col}___{i}" if col in data.columns[:i] else col for i, col in enumerate(data.columns)])
 
 
-            #print(len(data.columns))
-            #data.ta.cdl_pattern(name="all", append=True) # already included when getting filtered_ta_indicators
-
-            """
-            data['sma'] = ta.sma(data['Close'], length=14)
-            data['ema'] = ta.ema(data['Close'], length=14)
-            data['hma'] = ta.hma(data['Close'], length=14)
-            data['tma'] = ta.trima(data['Close'], length=14)
-            data['rma'] = ta.rma(data['Close'], length=14)
-            data.ta.macd(close=data['Close'], fast=12, slow=26, signal=9, append=True)
-            #data['macd'], data['macd_signal'], data['macd_hist'] = ta.trend.macd(data['Close'], fast=12, slow=26, signal=9, append=True)
-            data['rsi'] = ta.rsi(data['Close'], length=14)
-            #data['bollinger_upper'], data['bollinger_middle'], data['bollinger_lower'] = ta.bbands(data['Close'], length=14)
-            data.ta.bbands(close=data['Close'], length=14, append=True)
-            #data['adx'] = ta.adx(data['High'], data['Low'], data['Close'], length=14)
-            data.ta.adx(append=True)
-            #data['aroon_up'], data['aroon_down'] = ta.aroon(data['High'], data['Low'], length=14)
-            data.ta.aroon(high=data['High'], low=data['Low'], length=14, append=True)
-            data['force_index'] = ta.efi(data['Close'], data['Volume'], length=14)
-            data.ta.obv(append=True)
-            #data['obv'] = ta.obv(data['Close'], data['Volume'])
-            #data['obv'] = ta.volume.obv(data['Close'], data['Volume'])
-            data['accumulation_distribution'] = ta.ad(data['High'], data['Low'], data['Close'], data['Volume'])
-            ##data['mfi'] = (ta.mfi(data['High'], data['Low'], data['Close'], data['Volume'], length=14))
-            ##data['vwap'] = ta.vwap(data['High'], data['Low'], data['Close'], data['Volume'])
-            #data['klinger'] = ta.kvo(data['High'], data['Low'], data['Close'], data['Volume'])
-            try:
-                data.ta.kvo(append=True)
-            except AttributeError as attr_err:
-                # KVO_34_55_13 KVOs_34_55_13
-                tickers_to_dbl_chk.append(ticker)
-                data[['KVO_34_55_13', 'KVOs_34_55_13']] = None
-
-                print(attr_err)
-
-            data['cmf'] = ta.cmf(data['High'], data['Low'], data['Close'], data['Volume'], length=14)
-            ##?accumulation swing index ?##data['asi'] = ta.asi(data['High'], data['Low'], data['Close'], data['Volume'])
-            #data['efi'] = ta.efi(data['High'], data['Low'], data['Close'], data['Volume'])
-            data.ta.efi(append=True)
-            data['chaikin_oscillator'] = ta.cmf(data['High'], data['Low'], data['Close'], data['Volume'])
-            data['price_volume_trend'] = ta.pvt(data['Close'], data['Volume'])
-            data['pvol'] = ta.pvol(data['High'], data['Low'], data['Close'])
-            #data['fibonacci_retracement'] = ta.fwma(data['High'], data['Low'])
-            data.ta.fwma(append=True)
-            data['atr'] = ta.atr(data['High'], data['Low'], data['Close'], length=14)
-            #data['stochastic_rsi'] = ta.stochrsi(data['Close'], length=14)
-            data.ta.stochrsi(append=True)
-            #data['trix'] = ta.trix(data['Close'], length=14)
-            data.ta.trix(append=True)
-            #data['parabolic_sar'] = ta.psar(data['High'], data['Low'], data['Close'], af=0.02, max_af=0.2)
-            data.ta.psar(append=True)
-            data['cci'] = ta.cci(data['High'], data['Low'], data['Close'], length=14)
-            #data['donchian_upper'], data['donchian_middle'], data['donchian_lower'] = ta.donchian(data['High'], data['Low'], length=14)
-            data.ta.donchian(append=True)
-            #data['supertrend'] = ta.supertrend(data['High'], data['Low'], data['Close'], length=14, multiplier=3)
-            data.ta.supertrend(append=True)
-            #data['ichimoku_cloud'] = ta.ichimoku(data['High'], data['Low'], data['Close'])
-            data.ta.ichimoku(lookahead=False, append=True)
-            #data['dmi_plus'], data['dmi_minus'], data['adx'] = ta.dmi(data['High'], data['Low'], data['Close'], length=14)
-            data.ta.dm(append=True)
-            data['rvi'] = ta.rvi(data['Close'], length=14)
-            #data['normalized_average_true_range'] = ta.natr(data['Close'], length=14)
-            data.ta.natr(append=True)
-            """
-
-
+                del indicators_to_concat
+                gc.collect()
             #date_vs_datetime = ""
             if get_minutes:
                 data.insert(0, 'Datetime', data.index)
@@ -276,7 +244,7 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                 #date_vs_datetime = "Date"
             data.insert(0, 'Ticker', ticker)
 
-
+            data[f'{date_vs_datetime}'] = data[f'{date_vs_datetime}'].astype(str)
 
             conn = sqlite3.connect(db_name)
             cursor = conn.cursor()
@@ -284,7 +252,9 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
 
             create_table_sql = f'''
             CREATE TABLE IF NOT EXISTS "{ticker}" (
-                {", ".join([f"'{col}' TEXT" for col in data.columns])},
+                {" , ".join([f"'{col}' TEXT" if col in ['Date', 'Datetime', 'Ticker'] else
+                             f"'{col}' TINYINT" if col.upper().startswith('CDL_') else
+                             f"'{col}' DOUBLE" for col in data.columns])},
                 UNIQUE ("Ticker", "{date_vs_datetime}")
             )
             '''
@@ -327,6 +297,25 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
         print(f"Double check following tickers for potential issues during download/update;\n{tickers_to_dbl_chk}")
 
     return tickers_to_dbl_chk
+
+def apply_indicators_parallel(data, indicators):
+    """Apply indicators in parallel using multiprocessing."""
+    with Pool(cpu_count()) as pool:
+        results = pool.starmap(apply_indicator, [(data, indicator) for indicator in indicators])
+    return results
+
+
+
+def apply_indicator(data, indicator):
+    warnings.simplefilter(action='ignore', category=FutureWarning)
+    """Helper function to apply a single indicator to the data."""
+    try:
+        ta_function = getattr(data.ta, indicator)
+        result = ta_function(append=False)
+        return result
+    except Exception as e:
+        print(f"Failed to apply indicator {indicator}: {e}")
+        return None
 
 
 
@@ -419,54 +408,29 @@ def add_uniq_to_dbs(directory_path="", files_to_mod=[], date_col="Date", shard_d
 # when ran from pyscripter, actually updates db but also has memory leak
 
 if __name__ == '__main__':
+    # since print statements addup and slow down processing speed,
+    # summary of warnings being a lot of pandas_ta functionality currently won't work with next major vers of pandas
+
+
     #from shards.index_tickers import dow30_tickers, nasdaq100_tickers, sap500_tickers
 
-    #missing_nyse_tickers_rnd1 = ['QUAD', 'LON', 'LXFR', 'GWH', 'SOS', 'XYF', 'OPAD', 'TSQ', 'TISI', 'SITC', 'AHT', 'BIO-B', 'BTCM', 'NOTE', 'SJT', 'VNCE', 'CHMI', 'RFL', 'CCM', 'SUP', 'WOW', 'BW', 'PINE', 'BODI', 'ZVIA', 'KORE', 'ARCH', 'CPS', 'GATO', 'BKKT', 'CBAN', 'SOL', 'PRT', 'IH', 'MTR', 'AXR', 'MKFG', 'OCFT', 'HYAC', 'DTC', 'BKSY', 'BGSF', 'VATE', 'SPRU', 'TPVG', 'BRT', 'GHG', 'VHC', 'NRDY', 'BEST', 'MITT', 'NVRO', 'MOG-B', 'ONTF', 'KFS', 'DLNG', 'JACS', 'EQC', 'ATE', 'AKA', 'EARN', 'CIO', 'FEDU', 'NEUE', 'OIS', 'NUS', 'AP', 'ENFY', 'AOMR', 'SES', 'SBXD', 'NL', 'AZUL', 'ZEPP', 'BEDU', 'FET', 'CATO', 'ANVS', 'MDV', 'CVEO', 'FRGE', 'BKDT', 'PERF', 'CRNG', 'GPMT', 'HOUS', 'GEC', 'ALTG', 'KUKE', 'MEC', 'MOGU', 'DOUG', 'WBX', 'NTZ', 'BNED', 'EQS', 'SST', 'VPG', 'DBI', 'NRT', 'YSG', 'GHI', 'LFT', 'CLBR', 'SRG', 'TSE', 'CNF', 'VOC', 'AMTD', 'PNST', 'ZH', 'CULP', 'SMRT', 'LND', 'ENLC', 'NMG', 'NE-WSA', 'PSTL', 'NC', 'EB', 'EVC', 'SKIL', 'KNOP', 'AVD', 'RNGR', 'GROV', 'CBNA', 'LITB', 'RBOT', 'NRGV', 'ARL', 'HRTG', 'GTN-A', 'SKLZ', 'BYON', 'MTW', 'MSB', 'CLPR', 'MED', 'WHG', 'RPT', 'CHGG', 'SPCE', 'TLYS', 'SAR', 'WTI', 'FENG', 'PSQH', 'TCI', 'OOMA', 'SRFM', 'FOA', 'SPIR', 'FREY', 'HLLY', 'CRT', 'ORN', 'NYC', 'PKE', 'MG', 'DM', 'RMAX', 'AMPX', 'TBI', 'TG', 'PHX', 'AMPY', 'ONIT', 'ONL', 'LAW', 'CCRD', 'CMCM', 'COOK', 'SMHI', 'NINE', 'SMAR', 'ALUR', 'ANRO', 'MPLN', 'TBN', 'XIN', 'AEVA', 'MX', 'AMWL', 'ACRE', 'NGS', 'GTN', 'MBI', 'STEM', 'RM', 'HVT', 'LICY', 'FF', 'NREF', 'HBB', 'BHR', 'ACR', 'ODV', 'DSX', 'DHX', 'STG', 'OWLT', 'HSHP', 'SRI', 'GCTS', 'LOCL', 'BPT', 'UFI', 'B', 'ADCT', 'BARK', 'BSS', 'MPX', 'CIA', 'SRL', 'SQNS', 'PVL', 'ENZ', 'FTK', 'HVT-A', 'IPI', 'LANV', 'VLN']
-    #missing_nyse_tickers_rnd2 = ['ARCH', 'ATE', 'B', 'BIO-B', 'BKDT', 'BSS', 'ENLC', 'GATO', 'GEC', 'HVT-A', 'LON', 'MOG-B', 'NE-WSA', 'SITC', 'SMAR']
-    #missing_nyse_tickers_rnd3 = ['ARCH', 'ATE', 'B', 'BIO-B', 'BKDT', 'BSS', 'ENLC', 'GATO', 'GEC', 'HVT-A', 'LON', 'MOG-B', 'NE-WSA', 'SITC', 'SMAR']
-    ##from nyse_list_2025 import nyse_tickers
-    ##nyse_tickers = list(set(nyse_tickers))
-    ##missingnyse1 = ['AACT', 'AAM', 'AAMI', 'AC', 'ACCO', 'ACEL', 'ACR', 'ACRE', 'ADCT', 'AEVA', 'AGM-A', 'AGS', 'AHT', 'AKA', 'ALTG', 'ALUR', 'AMBC', 'AMPS', 'AMPX', 'AMPY', 'AMTB', 'AMTD', 'AMWL', 'ANRO', 'ANVS', 'AOMR', 'AP', 'ARCH', 'ARL', 'ASA', 'ASC', 'ASIX', 'ATE', 'AUNA', 'AVD', 'AVNS', 'AXL', 'AXR', 'AZUL', 'B', 'BALY', 'BALY-T', 'BARK', 'BBAI', 'BBW', 'BDN', 'BEDU', 'BEST', 'BFLY', 'BGS', 'BGSF', 'BH', 'BH-A', 'BHR', 'BKKT', 'BKSY', 'BLND', 'BNED', 'BOC', 'BODI', 'BPT', 'BRCC', 'BRDG', 'BRSP', 'BRT', 'BSS', 'BTCM', 'BW', 'BWMX', 'BXC', 'BYON', 'BZH', 'CAL', 'CANG', 'CAPL', 'CATO', 'CBAN', 'CBL', 'CBNA', 'CCM', 'CCO', 'CCRD', 'CEIX', 'CHCT', 'CHGG', 'CHMI', 'CHPT', 'CIA', 'CINT', 'CIO', 'CION', 'CLB', 'CLBR', 'CLCO', 'CLDT', 'CLPR', 'CLW', 'CMCM', 'CMP', 'CMTG', 'CNF', 'COOK', 'CPAC', 'CPF', 'CPS', 'CRD-A', 'CRD-B', 'CRNG', 'CRT', 'CSV', 'CTO', 'CTV', 'CULP', 'CURV', 'CVEO', 'CVLG', 'CYD', 'CYH', 'DAO', 'DBI', 'DDD', 'DDL', 'DEC', 'DHX', 'DIN', 'DLNG', 'DM', 'DNA', 'DOUG', 'DRD', 'DSX', 'DTC', 'EAF', 'EARN', 'EB', 'EBF', 'EBS', 'ECO', 'ECVT', 'EGY', 'EHAB', 'ENFY', 'ENLC', 'ENZ', 'EQBK', 'EQC', 'EQS', 'EQV', 'ETD', 'ETWO', 'EVC', 'EVTL', 'EXK', 'FC', 'FEDU', 'FENG', 'FET', 'FF', 'FNA', 'FOA', 'FPH', 'FPI', 'FREY', 'FRGE', 'FTK', 'FVR', 'GATO', 'GBLI', 'GCI', 'GCO', 'GCTS', 'GDOT', 'GEC', 'GES', 'GFR', 'GHG', 'GHI', 'GHLD', 'GHM', 'GIC', 'GMRE', 'GNE', 'GNK', 'GNTY', 'GOTU', 'GPMT', 'GPRK', 'GRNT', 'GROV', 'GSL', 'GTN', 'GTN-A', 'GWH', 'HBB', 'HIPO', 'HKD', 'HLF', 'HLLY', 'HOUS', 'HOV', 'HPP', 'HRTG', 'HSHP', 'HUYA', 'HVT', 'HVT-A', 'HY', 'HYAC', 'HZO', 'IH', 'IIIN', 'INN', 'IPI', 'IVR', 'JACS', 'JELD', 'JILL', 'JMIA', 'KFS', 'KIND', 'KNOP', 'KODK', 'KOP', 'KORE', 'KREF', 'KUKE', 'LAAC', 'LAC', 'LANV', 'LAW', 'LDI', 'LFT', 'LICY', 'LITB', 'LND', 'LOCL', 'LON', 'LVWR', 'LXFR', 'LXU', 'LZM', 'MAGN', 'MATV', 'MAX', 'MBI', 'MCB', 'MCS', 'MDV', 'MEC', 'MED', 'MEG', 'MEI', 'MG', 'MITT', 'MKFG', 'MLP', 'MLR', 'MOGU', 'MOV', 'MPLN', 'MPX', 'MSB', 'MSC', 'MTAL', 'MTR', 'MTUS', 'MTW', 'MUX', 'MX', 'MYE', 'MYTE', 'NAT', 'NBR', 'NC', 'NCDL', 'NE-WSA', 'NEP', 'NEUE', 'NEXA', 'NGL', 'NGS', 'NGVC', 'NINE', 'NL', 'NLOP', 'NMG', 'NOA', 'NOAH', 'NOTE', 'NOVA', 'NPK', 'NPKI', 'NRDY', 'NREF', 'NRGV', 'NRT', 'NTZ', 'NUS', 'NUVB', 'NVRI', 'NVRO', 'NYC', 'OCFT', 'ODC', 'ODV', 'OEC', 'OIS', 'OLP', 'ONIT', 'ONL', 'ONTF', 'OOMA', 'OPAD', 'OPY', 'ORC', 'ORN', 'OWLT', 'PACK', 'PBT', 'PDS', 'PERF', 'PFLT', 'PHX', 'PINE', 'PKE', 'PKST', 'PLOW', 'PLYM', 'PNNT', 'PNST', 'PRA', 'PRLB', 'PRT', 'PSBD', 'PSQH', 'PSTL', 'PVL', 'QBTS', 'QD', 'QUAD', 'RBOT', 'RDW', 'RERE', 'REX', 'RFL', 'RGR', 'RM', 'RMAX', 'RNGR', 'RPT', 'RSKD', 'RWT', 'RYAM', 'RYI', 'SAR', 'SB', 'SBSI', 'SBXD', 'SCM', 'SD', 'SES', 'SGU', 'SITC', 'SJT', 'SKIL', 'SKLZ', 'SLQT', 'SMAR', 'SMBK', 'SMC', 'SMHI', 'SMP', 'SMRT', 'SNDA', 'SOL', 'SOS', 'SPCE', 'SPIR', 'SPLP', 'SPMC', 'SPRU', 'SQ', 'SQNS', 'SRFM', 'SRG', 'SRI', 'SRL', 'SST', 'STEM', 'STG', 'SUP', 'SXC', 'TBI', 'TBN', 'TCI', 'TEN', 'TG', 'TISI', 'TIXT', 'TK', 'TLYS', 'TPVG', 'TRAK', 'TRC', 'TRTX', 'TSE', 'TSQ', 'TTI', 'TV', 'TWI', 'TXO', 'TYG', 'UAN', 'UFI', 'UHT', 'UIS', 'USNA', 'UTL', 'UVE', 'VATE', 'VEL', 'VHC', 'VHI', 'VLN', 'VNCE', 'VOC', 'VPG', 'VTS', 'WBX', 'WDH', 'WHG', 'WLKP', 'WNC', 'WOLF', 'WOW', 'WSR', 'WTI', 'XIN', 'XPER', 'XPOF', 'XYF', 'YALA', 'YEXT', 'YRD', 'YSG', 'ZEPP', 'ZH', 'ZIP', 'ZKH', 'ZVIA']
-    ##missingnyse3 = ['AGM-A', 'ARCH', 'ATE', 'B', 'BSS', 'CEIX', 'ENLC', 'GATO', 'GEC', 'LON', 'NE-WSA', 'NEP', 'SMAR', 'SQ']
-    ##missingnyse4 = ['AGM-A', 'ARCH', 'ATE', 'B', 'BSS', 'CEIX', 'ENLC', 'GATO', 'GEC', 'LON', 'NE-WSA', 'NEP', 'SMAR', 'SQ']
+    from stock_info.ticker_lists.nyse_list_merged import nyse_tickers # 3676
+    from stock_info.ticker_lists.nasdaq_list_merged import nasdaq_tickers # 5181
+    #nyse_set = set(nyse_tickers)
+    #nasdaq_set = set(nasdaq_tickers)
+    #unique_nyse = nyse_set.difference(nasdaq_set) # 3676 // was ~1900 in 2025 ticker only
+    #unique_nasdaq = nasdaq_set.difference(nyse_set) # 5181 // was ~3300 in 2025 ticker only
+    #print(f"original nyse {len(nyse_tickers)} vs unique nyse {len(list(nyse_set))}")
+    #print(f"original nasdaq {len(nasdaq_tickers)} vs unique nasdaq {len(list(nasdaq_set))}")
+
+    #nyse_dblchk = download_and_store_stock_data_minutes(nyse_tickers, get_minutes=False, _output_dir="./shards/nyse/", _skip_indicators=False, _dl_slack_days=3)
     ##nyse_dblchk = download_and_store_stock_data_minutes(missingnyse3, get_minutes=True, _output_dir="nyse_feb/", _skip_indicators=True, _dl_slack_days=5)
-    print("NYSE - Data download and storage complete with technical indicators!")
+    #print("NYSE - Data download and storage complete with technical indicators!")
+
+    nyse_dblchk = download_and_store_stock_data_minutes(['GOOG'], get_minutes=False, _output_dir="./shards/nasdaq/", _skip_indicators=False, _dl_slack_days=3)
 
 
-    #missingnyse2 = ['AACT', 'AAM', 'AAMI', 'AC', 'ACCO', 'ACEL', 'ACR', 'ACRE', 'ADCT', 'AEVA', 'AGM-A', 'AGS', 'AHT', 'AKA', 'ALTG', 'ALUR', 'AMBC', 'AMPS', 'AMPX', 'AMPY', 'AMTB', 'AMTD', 'AMWL', 'ANRO', 'ANVS', 'AOMR', 'AP', 'ARCH', 'ARL', 'ASA', 'ASC', 'ASIX', 'ATE', 'AUNA', 'AVD', 'AVNS', 'AXL', 'AXR', 'AZUL', 'B', 'BALY', 'BALY-T', 'BARK', 'BBAI', 'BBW', 'BDN', 'BEDU', 'BEST', 'BFLY', 'BGS', 'BGSF', 'BH', 'BH-A', 'BHR', 'BKKT', 'BKSY', 'BLND', 'BNED', 'BOC', 'BODI', 'BPT', 'BRCC', 'BRDG', 'BRSP', 'BRT', 'BSS', 'BTCM', 'BW', 'BWMX', 'BXC', 'BYON', 'BZH', 'CAL', 'CANG', 'CAPL', 'CATO', 'CBAN', 'CBL', 'CBNA', 'CCM', 'CCO', 'CCRD', 'CEIX', 'CHCT', 'CHGG', 'CHMI', 'CHPT', 'CIA', 'CINT', 'CIO', 'CION', 'CLB', 'CLBR', 'CLCO', 'CLDT', 'CLPR', 'CLW', 'CMCM', 'CMP', 'CMTG', 'CNF', 'COOK', 'CPAC', 'CPF', 'CPS', 'CRD-A', 'CRD-B', 'CRNG', 'CRT', 'CSV', 'CTO', 'CTV', 'CULP', 'CURV', 'CVEO', 'CVLG', 'CYD', 'CYH', 'DAO', 'DBI', 'DDD', 'DDL', 'DEC', 'DHX', 'DIN', 'DLNG', 'DM', 'DNA', 'DOUG', 'DRD', 'DSX', 'DTC', 'EAF', 'EARN', 'EB', 'EBF', 'EBS', 'ECO', 'ECVT', 'EGY', 'EHAB', 'ENFY', 'ENLC', 'ENZ', 'EQBK', 'EQC', 'EQS', 'EQV', 'ETD', 'ETWO', 'EVC', 'EVTL', 'EXK', 'FC', 'FEDU', 'FENG', 'FET', 'FF', 'FNA', 'FOA', 'FPH', 'FPI', 'FREY', 'FRGE', 'FTK', 'FVR', 'GATO', 'GBLI', 'GCI', 'GCO', 'GCTS', 'GDOT', 'GEC', 'GES', 'GFR', 'GHG', 'GHI', 'GHLD', 'GHM', 'GIC', 'GMRE', 'GNE', 'GNK', 'GNTY', 'GOTU', 'GPMT', 'GPRK', 'GRNT', 'GROV', 'GSL', 'GTN', 'GTN-A', 'GWH', 'HBB', 'HIPO', 'HKD', 'HLF', 'HLLY', 'HOUS', 'HOV', 'HPP', 'HRTG', 'HSHP', 'HUYA', 'HVT', 'HVT-A', 'HY', 'HYAC', 'HZO', 'IH', 'IIIN', 'INN', 'IPI', 'IVR', 'JACS', 'JELD', 'JILL', 'JMIA', 'KFS', 'KIND', 'KNOP', 'KODK', 'KOP', 'KORE', 'KREF', 'KUKE', 'LAAC', 'LAC', 'LANV', 'LAW', 'LDI', 'LFT', 'LICY', 'LITB', 'LND', 'LOCL', 'LON', 'LVWR', 'LXFR', 'LXU', 'LZM', 'MAGN', 'MATV', 'MAX', 'MBI', 'MCB', 'MCS', 'MDV', 'MEC', 'MED', 'MEG', 'MEI', 'MG', 'MITT', 'MKFG', 'MLP', 'MLR', 'MOGU', 'MOV', 'MPLN', 'MPX', 'MSB', 'MSC', 'MTAL', 'MTR', 'MTUS', 'MTW', 'MUX', 'MX', 'MYE', 'MYTE', 'NAT', 'NBR', 'NC', 'NCDL', 'NE-WSA', 'NEP', 'NEUE', 'NEXA', 'NGL', 'NGS', 'NGVC', 'NINE', 'NL', 'NLOP', 'NMG', 'NOA', 'NOAH', 'NOTE', 'NOVA', 'NPK', 'NPKI', 'NRDY', 'NREF', 'NRGV', 'NRT', 'NTZ', 'NUS', 'NUVB', 'NVRI', 'NVRO', 'NYC', 'OCFT', 'ODC', 'ODV', 'OEC', 'OIS', 'OLP', 'ONIT', 'ONL', 'ONTF', 'OOMA', 'OPAD', 'OPY', 'ORC', 'ORN', 'OWLT', 'PACK', 'PBT', 'PDS', 'PERF', 'PFLT', 'PHX', 'PINE', 'PKE', 'PKST', 'PLOW', 'PLYM', 'PNNT', 'PNST', 'PRA', 'PRLB', 'PRT', 'PSBD', 'PSQH', 'PSTL', 'PVL', 'QBTS', 'QD', 'QUAD', 'RBOT', 'RDW', 'RERE', 'REX', 'RFL', 'RGR', 'RM', 'RMAX', 'RNGR', 'RPT', 'RSKD', 'RWT', 'RYAM', 'RYI', 'SAR', 'SB', 'SBSI', 'SBXD', 'SCM', 'SD', 'SES', 'SGU', 'SITC', 'SJT', 'SKIL', 'SKLZ', 'SLQT', 'SMAR', 'SMBK', 'SMC', 'SMHI', 'SMP', 'SMRT', 'SNDA', 'SOL', 'SOS', 'SPCE', 'SPIR', 'SPLP', 'SPMC', 'SPRU', 'SQ', 'SQNS', 'SRFM', 'SRG', 'SRI', 'SRL', 'SST', 'STEM', 'STG', 'SUP', 'SXC', 'TBI', 'TBN', 'TCI', 'TEN', 'TG', 'TISI', 'TIXT', 'TK', 'TLYS', 'TPVG', 'TRAK', 'TRC', 'TRTX', 'TSE', 'TSQ', 'TTI', 'TV', 'TWI', 'TXO', 'TYG', 'UAN', 'UFI', 'UHT', 'UIS', 'USNA', 'UTL', 'UVE', 'VATE', 'VEL', 'VHC', 'VHI', 'VLN', 'VNCE', 'VOC', 'VPG', 'VTS', 'WBX', 'WDH', 'WHG', 'WLKP', 'WNC', 'WOLF', 'WOW', 'WSR', 'WTI', 'XIN', 'XPER', 'XPOF', 'XYF', 'YALA', 'YEXT', 'YRD', 'YSG', 'ZEPP', 'ZH', 'ZIP', 'ZKH', 'ZVIA']
-
-
-    #missing_tickers_round1 = ['YHNA', 'IMKT-A', 'WRD', 'MLAC', 'SPHL', 'SPHA', 'PONY', 'VCIC', 'POLE', 'YSXT', 'CHAR', 'ALDF', 'HUHU', 'NOEM', 'SAG', 'ZAP', 'CCIR', 'GANX', 'GSRT', 'NAMI', 'OACC', 'LSE', 'CGTL', 'FGL', 'YAAS', 'DEVS', 'JUNS', 'BSII', 'LPBB', 'CAPN', 'HIT', 'ORIS', 'LNKS', 'NCEW', 'SFHG', 'ACOG', 'ZSPC', 'FBLA', 'HSPT', 'SNYR', 'DYNX', 'PLRZ', 'GELS', 'SNRE', 'RDAC', 'SEPN', 'IZTC', 'RADX', 'TAVI', 'BACQ', 'LBGJ', 'PTLE', 'BEAG', 'DRDB', 'TDAC', 'NBIS']
-    #missing_nasdaq_tickers_rnd1 = ['BHRB', 'GAUZ', 'IMKT-A', 'POOL', 'REG', 'SSSS', 'SVCO', 'TDAC']
-    #missing_nasdaq_tickers_rnd2 = ['GODN', 'HTLF', 'IMKT-A', 'LATG', 'TDAC', 'USAP']
-    ##from nasdaq_list_2025 import nasdaq_tickers
-    ##nasdaq_tickers = list(set(nasdaq_tickers))
+    #from stock_info.ticker_lists.nasdaq_list_merged import nasdaq_tickers
+    #nasdaq_dblchk = download_and_store_stock_data_minutes(nasdaq_tickers, get_minutes=False, _output_dir="./shards/nasdaq/", _skip_indicators=False, _dl_slack_days=3)
     ##nasdaq_dblchk = download_and_store_stock_data_minutes(nasdaq_tickers, get_minutes=True, _output_dir="nasdaq_feb/", _skip_indicators=True, _dl_slack_days=5)
     ##print("NASDAQ - Data download and storage complete with technical indicators!")
-    #nassdaq_missing = ['HUDA', 'IMKT-A', 'TDAC']
-    ## experiments trying to find / fix memory leak,
-    ##   issue appears to be with dynamic application of indicator functions and freeing the memory after use there
-    ##   pandas_ta will BREAK on pandas 3.0
-    #tracemalloc.start()
-    #x = ['WMT', 'AMD', 'GOOG', 'MSFT']
-    #nasdaq_dblchk = download_and_store_stock_data_minutes(['MSFT'], get_minutes=False, _output_dir="shards/")
-    '''
-    snapshot = tracemalloc.take_snapshot()
-    top_stats = snapshot.statistics('lineno')
-    current_file = path.abspath(__file__)
-    print(len(top_stats))
-    #filtered_stats = [stat for stat in top_stats if path.abspath(stat.filename) == current_file]
-    filtered_stats = [
-        stat for stat in top_stats
-        if any(path.abspath(frame.filename) == current_file for frame in stat.traceback)
-    ]
-    print(len(filtered_stats))
-    filtered_stats_sorted_by_size = sorted(filtered_stats, key=lambda stat: stat.size, reverse=True)
-    #top_stats_sorted_by_size = sorted(top_stats, key=lambda stat: stat.size, reverse=True)
-
-    print("Tracemalloc results")
-    for stat in top_stats[:25]:
-        print(stat)
-    #objgraph.show_growth(limit=25)
-    '''
-
