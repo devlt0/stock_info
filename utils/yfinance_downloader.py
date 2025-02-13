@@ -50,7 +50,7 @@ def get_latest_date(database_path, table_name, date_column='Date'):
 #@profile
 def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_date="", get_minutes=False,
     _shard_on_ticker=True, _def_db_basename="stock_data", _ticker_unknown_state=True,
-    _output_dir="", _dl_slack_days=2, _skip_indicators=False, _cpu_cores = 4):
+    _output_dir="", _dl_slack_days=2, _skip_indicators=False, _cpu_cores = 6):
 
     # use start date as current date - 30 d
     # end date as current date
@@ -212,20 +212,39 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                     gc.collect()
                 '''
                 indicator_count = 0
+                percent_range_match = 0.05
                 for result in indicators_to_concat:
-                    headers = result.columns if isinstance(result, type(pd.DataFrame())) else result.name if isinstance(result, type(pd.Series()) ) else None
+                    headers = result.columns if isinstance(result, type(pd.DataFrame())) else result.name if isinstance(result, type(pd.Series()) ) else result
                     #indicator_added = False
                     if result is not None:
                         try:
-                            if data.index.equals(result.index):
-                            #if 'Date' in data.columns and 'Date' in result.columns \
-                            #and data['Date'].equals(result['Date']):
-                                data = pd.concat([data, result], axis=1)
-                                #indicator_added = True
-                                indicator_count += 1
+                            len_data_index = len(data.index)
+                            len_result_index = len(result.index)
+                            if data.index.equals(result.index): #or \
+                            #('Date' in data.columns and 'Date' in result.columns \
+                            #and data['Date'].equals(result['Date']) ):
+                                #data = pd.concat([data, result], axis=1)
+                                #indicator_count += 1
+                                pass # skip to end, no prep or changes required
+                            elif len_data_index == len_result_index:
+                                result = result.set_index(data.index)
+                                #data = pd.concat([data, result], axis=1)
+                                #indicator_count += 1
+                            elif len_result_index > len_data_index * (1-percent_range_match) \
+                            and len_result_index < len_data_index:
+                                offset = len_data_index - len_result_index  # Calculate offset
+                                result = result.set_index(data.index[offset:])  # Shift index
+                                #data = pd.concat([data, result], axis=1)
+                                #indicator_count += 1
+
                             else:
                                 print(f"Skipping concatenation: indices do not match.\n{headers}")
-                            #data = pd.concat([data, result], axis=1)
+                                print(f"data index: {len(data.index)}")
+                                print(f"result index: {len(result.index)}")
+                                continue # will skip the concat
+                            data = pd.concat([data, result], axis=1)
+                            indicator_count += 1
+
 
                         except Exception as e:
                             print(e)
