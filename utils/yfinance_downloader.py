@@ -175,7 +175,7 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
             #  try default way of append=True,that fails, try pandas.concat, that fails we mark it and move on
             if not _skip_indicators:
                 indicators_to_concat = []
-                indicators_to_concat = apply_indicators_parallel(data, filtered_ta_indicators)
+                indicators_to_concat = apply_indicators_parallel(data, filtered_ta_indicators, _cpu_cores)
                 #= pool.starmap(apply_indicator, [(data, indicator) for indicator in filtered_ta_indicators])
                 #with Pool(_cpu_cores) as pool:
                 #    indicators_to_concat = pool.starmap(apply_indicator, [(data, indicator) for indicator in indicators])
@@ -321,9 +321,9 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
 
     return tickers_to_dbl_chk
 
-def apply_indicators_parallel(data, indicators):
+def apply_indicators_parallel(data, indicators, _cpus_to_use=2):
     """Apply indicators in parallel using multiprocessing."""
-    with Pool(cpu_count()) as pool:
+    with Pool(_cpus_to_use) as pool:
         results = pool.starmap(apply_indicator, [(data, indicator) for indicator in indicators])
     return results
 
@@ -446,11 +446,11 @@ if __name__ == '__main__':
     #print(f"original nyse {len(nyse_tickers)} vs unique nyse {len(list(nyse_set))}")
     #print(f"original nasdaq {len(nasdaq_tickers)} vs unique nasdaq {len(list(nasdaq_set))}")
 
-    #nyse_dblchk = download_and_store_stock_data_minutes(nyse_tickers, get_minutes=False, _output_dir="./shards/nyse/", _skip_indicators=False, _dl_slack_days=3)
+    nyse_dblchk = download_and_store_stock_data_minutes(nyse_tickers, get_minutes=False, _output_dir="./shards/nyse/", _skip_indicators=False, _dl_slack_days=3)
     ##nyse_dblchk = download_and_store_stock_data_minutes(missingnyse3, get_minutes=True, _output_dir="nyse_feb/", _skip_indicators=True, _dl_slack_days=5)
     #print("NYSE - Data download and storage complete with technical indicators!")
 
-    nyse_dblchk = download_and_store_stock_data_minutes(['GOOG'], get_minutes=False, _output_dir="./shards/nyse/", _skip_indicators=False, _dl_slack_days=3)
+    #nyse_dblchk = download_and_store_stock_data_minutes(['GOOG'], get_minutes=False, _output_dir="./shards/nyse/", _skip_indicators=False, _dl_slack_days=3)
 
 
     #from stock_info.ticker_lists.nasdaq_list_merged import nasdaq_tickers
