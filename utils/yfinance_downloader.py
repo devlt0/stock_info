@@ -211,28 +211,32 @@ def download_and_store_stock_data_minutes(tickers, start_date="1900-01-01", end_
                     del indicators_to_concat
                     gc.collect()
                 '''
+                indicator_count = 0
                 for result in indicators_to_concat:
                     headers = result.columns if isinstance(result, type(pd.DataFrame())) else result.name if isinstance(result, type(pd.Series()) ) else None
                     #indicator_added = False
                     if result is not None:
                         try:
-                            #if data.index.equals(result.index):
-                            if 'Date' in data.columns and 'Date' in result.columns \
-                            and data['Date'].equals(result['Date']):
+                            if data.index.equals(result.index):
+                            #if 'Date' in data.columns and 'Date' in result.columns \
+                            #and data['Date'].equals(result['Date']):
                                 data = pd.concat([data, result], axis=1)
                                 #indicator_added = True
+                                indicator_count += 1
                             else:
                                 print(f"Skipping concatenation: indices do not match.\n{headers}")
-                            data = pd.concat([data, result], axis=1)
+                            #data = pd.concat([data, result], axis=1)
 
                         except Exception as e:
                             print(e)
-                    print(f"Skipping concatenation: no result data.\n{headers}")
-                #data = data.T.drop_duplicates().T # remove duplicate columns
-                ##data = data.drop(columns=['DMP_14']) # not sure why we duplicate ere
-                data.columns = pd.Index([f"{col}___{i}" if col in data.columns[:i] else col for i, col in enumerate(data.columns)])
+                    else:
+                        print(f"Skipping concatenation: no result data.\n{headers}")
+                #data = data.T.drop_duplicates().T # remove duplicate columns does NOT work
+                data = data.loc[:, ~data.columns.duplicated()]
+                #data = data.drop(columns=['DMP_14', 'DMN_14', 'Adj Close']) # not sure why we duplicate ere
+                #data.columns = pd.Index([f"{col}___{i}" if col in data.columns[:i] else col for i, col in enumerate(data.columns)])
 
-
+                print(f"used {indicator_count} # indicators")
                 del indicators_to_concat
                 gc.collect()
             #date_vs_datetime = ""
@@ -427,7 +431,7 @@ if __name__ == '__main__':
     ##nyse_dblchk = download_and_store_stock_data_minutes(missingnyse3, get_minutes=True, _output_dir="nyse_feb/", _skip_indicators=True, _dl_slack_days=5)
     #print("NYSE - Data download and storage complete with technical indicators!")
 
-    nyse_dblchk = download_and_store_stock_data_minutes(['GOOG'], get_minutes=False, _output_dir="./shards/nasdaq/", _skip_indicators=False, _dl_slack_days=3)
+    nyse_dblchk = download_and_store_stock_data_minutes(['GOOG'], get_minutes=False, _output_dir="./shards/nyse/", _skip_indicators=False, _dl_slack_days=3)
 
 
     #from stock_info.ticker_lists.nasdaq_list_merged import nasdaq_tickers
